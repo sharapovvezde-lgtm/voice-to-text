@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+
+# Установка
+.installed
+launch.vbs
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Модели Whisper (скачиваются автоматически)
+*.pt
+
+# Логи
+*.log
+
+# Временные файлы
+*.tmp
+*.temp

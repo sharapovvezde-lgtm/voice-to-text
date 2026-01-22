@@ -1,0 +1,25 @@
+# Whisper Quick-Type - Зависимости
+# Python 3.10+ required
+
+# Распознавание речи
+openai-whisper
+
+# GUI
+PyQt6
+
+# Горячие клавиши
+pynput
+
+# Запись звука
+sounddevice
+scipy
+numpy
+
+# Буфер обмена
+pyperclip
+
+# Ввод текста
+pyautogui
+
+# Сборка в EXE
+pyinstaller
