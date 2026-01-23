@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         
         self._recording = False
+        self._processing = False
         
         self._init_ui()
         self._init_tray()
@@ -428,9 +429,15 @@ class MainWindow(QMainWindow):
         self._recording = False
         self.indicator.stop()
         
+        # Защита от повторной обработки
+        if self._processing:
+            return
+        self._processing = True
+        
         audio = self.recorder.stop_recording()
         if audio is None or len(audio) == 0:
             self._log("⚠️ Нет аудио")
+            self._processing = False
             return
         
         dur = self.recorder.get_audio_duration(audio)
@@ -438,14 +445,16 @@ class MainWindow(QMainWindow):
         
         if dur < 0.4:
             self._log("⚠️ Слишком коротко")
+            self._processing = False
             return
         
         self._log("🔄 Распознавание...")
         self._worker = TranscribeWorker(self.transcriber, audio)
-        self._worker.finished.connect(self._on_transcribed)
+        self._worker.finished.connect(self._on_transcribed, Qt.ConnectionType.SingleShotConnection)
         self._worker.start()
     
     def _on_transcribed(self, text):
+        self._processing = False
         if text:
             self._log(f"📝 {text[:60]}...")
             self._insert(text)
