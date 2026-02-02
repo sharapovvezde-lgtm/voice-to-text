@@ -168,8 +168,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Whisper Quick-Type [DEV]")
-        self.setMinimumSize(550, 700)
-        self.resize(550, 750)
+        self.setMinimumSize(700, 800)
+        # Открываемся на пол монитора
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(screen.width() * 0.5), int(screen.height() * 0.85))
         
         # Компоненты
         self.recorder = AudioRecorder()
@@ -191,6 +193,7 @@ class MainWindow(QMainWindow):
         self._last_recording = None
         self._selected_region = None  # ОБЯЗАТЕЛЬНО для записи!
         self._region_selector = None  # Селектор области экрана
+        self._quick_record_mode = False  # Режим быстрой записи
         
         self._init_ui()
         self._init_tray()
@@ -206,7 +209,11 @@ class MainWindow(QMainWindow):
         )
         self.hotkey.start()
         
-        self._log(f"🚀 [DEV] Горячие клавиши: {self.hotkey.get_hotkey_string()}")
+        # Горячая клавиша для быстрой записи встречи (Ctrl+Alt+PrintScreen)
+        self._init_meeting_hotkey()
+        
+        self._log(f"🚀 [DEV] Голос: {self.hotkey.get_hotkey_string()}")
+        self._log(f"📹 [DEV] Быстрая запись: Ctrl+Alt+PrintScreen")
         QTimer.singleShot(300, self._load_model)
     
     def _init_ui(self):
@@ -416,7 +423,8 @@ class MainWindow(QMainWindow):
         self.loopback_status = QLabel("")
         self.loopback_status.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
         audio_layout.addWidget(self.loopback_status)
-        self._check_loopback()
+        # Отложенная проверка loopback чтобы не крашить при старте
+        QTimer.singleShot(500, self._check_loopback)
         
         layout.addWidget(audio_group)
         
@@ -515,6 +523,62 @@ class MainWindow(QMainWindow):
         layout.addWidget(rec_group)
         
         self._refresh_recordings()
+    
+    def _init_meeting_hotkey(self):
+        """Инициализация горячей клавиши Ctrl+Alt+PrintScreen для быстрой записи"""
+        from pynput import keyboard
+        
+        self._meeting_hotkey_pressed = set()
+        self._meeting_hotkey_listener = None
+        
+        def on_press(key):
+            try:
+                # Добавляем нажатую клавишу
+                if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                    self._meeting_hotkey_pressed.add('ctrl')
+                elif key == keyboard.Key.alt_l or key == keyboard.Key.alt_r:
+                    self._meeting_hotkey_pressed.add('alt')
+                elif key == keyboard.Key.print_screen:
+                    self._meeting_hotkey_pressed.add('prtsc')
+                
+                # Проверяем комбинацию Ctrl+Alt+PrintScreen
+                if self._meeting_hotkey_pressed == {'ctrl', 'alt', 'prtsc'}:
+                    # Запускаем в главном потоке
+                    QTimer.singleShot(0, self._quick_meeting_record)
+                    self._meeting_hotkey_pressed.clear()
+                    
+            except Exception as e:
+                pass
+        
+        def on_release(key):
+            try:
+                if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                    self._meeting_hotkey_pressed.discard('ctrl')
+                elif key == keyboard.Key.alt_l or key == keyboard.Key.alt_r:
+                    self._meeting_hotkey_pressed.discard('alt')
+                elif key == keyboard.Key.print_screen:
+                    self._meeting_hotkey_pressed.discard('prtsc')
+            except:
+                pass
+        
+        self._meeting_hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self._meeting_hotkey_listener.daemon = True
+        self._meeting_hotkey_listener.start()
+    
+    def _quick_meeting_record(self):
+        """Быстрая запись встречи: выбор области → автостарт"""
+        if self._meeting_recording:
+            # Если уже идёт запись - останавливаем
+            self._stop_meeting_recording()
+            self.tray.showMessage("Запись встречи", "⏹️ Запись остановлена", QSystemTrayIcon.MessageIcon.Information, 2000)
+            return
+        
+        self._log("📹 Быстрая запись: выберите область...")
+        self.tray.showMessage("Запись встречи", "🎯 Выберите область экрана мышкой", QSystemTrayIcon.MessageIcon.Information, 3000)
+        
+        # Запускаем выбор области с автостартом записи
+        self._quick_record_mode = True
+        self._select_screen_region()
     
     def _init_tray(self):
         pix = QPixmap(24, 24)
@@ -774,8 +838,14 @@ class MainWindow(QMainWindow):
     def _on_region_selected(self, region):
         """Колбэк после выбора области"""
         self._selected_region = region
-        self.show()
-        self.activateWindow()
+        
+        # В режиме быстрой записи - не показываем окно, сразу записываем
+        quick_mode = getattr(self, '_quick_record_mode', False)
+        self._quick_record_mode = False
+        
+        if not quick_mode:
+            self.show()
+            self.activateWindow()
         
         if region:
             # Показываем полные координаты: позиция + размер
@@ -787,6 +857,12 @@ class MainWindow(QMainWindow):
                         background: #E8F5E9; border-radius: 5px; }
             """)
             self._log(f"✅ Область: pos=({region['left']},{region['top']}) size={region['width']}x{region['height']}")
+            
+            # Автостарт в режиме быстрой записи
+            if quick_mode:
+                self._log("🚀 Автозапуск записи...")
+                self.tray.showMessage("Запись встречи", "🔴 Запись началась!\nCtrl+Alt+PrtSc для остановки", QSystemTrayIcon.MessageIcon.Information, 2000)
+                QTimer.singleShot(100, self._start_meeting_recording)
         else:
             self.region_label.setText("⚠️ Область НЕ выбрана — запись невозможна")
             self.region_label.setStyleSheet("""
@@ -794,6 +870,8 @@ class MainWindow(QMainWindow):
                         background: #ffebee; border-radius: 5px; }
             """)
             self._log("❌ Выбор отменён")
+            if quick_mode:
+                self.tray.showMessage("Запись встречи", "❌ Выбор области отменён", QSystemTrayIcon.MessageIcon.Warning, 2000)
     
     def _start_meeting_recording(self):
         if self._meeting_recording or self._recording:
@@ -983,6 +1061,9 @@ class MainWindow(QMainWindow):
         if self._meeting_recording:
             self._stop_meeting_recording()
         self.hotkey.stop()
+        # Останавливаем listener горячих клавиш для встреч
+        if hasattr(self, '_meeting_hotkey_listener') and self._meeting_hotkey_listener:
+            self._meeting_hotkey_listener.stop()
         self.tray.hide()
         QApplication.quit()
     
