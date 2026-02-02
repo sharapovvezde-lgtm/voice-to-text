@@ -18,7 +18,7 @@ echo.
 pip show mss >nul 2>&1
 if errorlevel 1 (
     echo  [!] Устанавливаю зависимости для Meeting Recorder...
-    pip install mss opencv-python Pillow soundcard imageio[ffmpeg] ffmpeg-python pygetwindow -q
+    pip install mss opencv-python Pillow pyaudiowpatch pygetwindow -q
     echo  [OK] Зависимости установлены
     echo.
 )

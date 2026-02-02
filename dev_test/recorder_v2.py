@@ -1,6 +1,6 @@
 """
 Meeting Recorder v2 — Универсальный захват экрана + 2 аудиоканала
-- Видео: захват экрана/окна через mss (высокий FPS)
+- Видео: захват выбранной области экрана через mss
 - Аудио 1: Микрофон (голос пользователя = "Я")
 - Аудио 2: Системный звук WASAPI Loopback (голос собеседника)
 - Выход: .avi + отдельные WAV файлы для транскрибации
@@ -9,7 +9,6 @@ import os
 import sys
 import time
 import threading
-import queue
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -20,19 +19,23 @@ import mss
 import sounddevice as sd
 from scipy.io import wavfile
 
-# Опционально: soundcard для WASAPI Loopback
+# PyAudio для WASAPI Loopback
 try:
-    import soundcard as sc
-    SOUNDCARD_AVAILABLE = True
+    import pyaudiowpatch as pyaudio
+    PYAUDIO_AVAILABLE = True
 except ImportError:
-    SOUNDCARD_AVAILABLE = False
-    print("⚠️ soundcard не установлен. Loopback недоступен.")
+    try:
+        import pyaudio
+        PYAUDIO_AVAILABLE = True
+    except ImportError:
+        PYAUDIO_AVAILABLE = False
+        print("⚠️ pyaudio/pyaudiowpatch не установлен")
 
 
 # ===== Виджет выбора области экрана =====
-from PyQt6.QtWidgets import QWidget, QApplication, QRubberBand
-from PyQt6.QtCore import Qt, QRect, QPoint
-from PyQt6.QtGui import QPainter, QColor, QScreen
+from PyQt6.QtWidgets import QWidget, QApplication, QRubberBand, QLabel
+from PyQt6.QtCore import Qt, QRect, QPoint, QTimer
+from PyQt6.QtGui import QPainter, QColor, QFont
 
 
 class ScreenRegionSelector(QWidget):
@@ -45,8 +48,9 @@ class ScreenRegionSelector(QWidget):
         self.callback = callback
         self.selection = None
         self.origin = QPoint()
+        self.current_rect = QRect()
         
-        # Полноэкранный полупрозрачный оверлей
+        # Полноэкранный оверлей
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -60,41 +64,59 @@ class ScreenRegionSelector(QWidget):
         geometry = screen.virtualGeometry()
         self.setGeometry(geometry)
         
-        # Рамка выделения
-        self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self._drawing = False
     
     def paintEvent(self, event):
         painter = QPainter(self)
-        # Полупрозрачный тёмный фон
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
         
-        # Инструкция
+        # Полупрозрачный тёмный фон
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 120))
+        
+        # Если выделяем область - рисуем её
+        if self._drawing and not self.current_rect.isNull():
+            # Очищаем выделенную область (делаем её прозрачной)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(self.current_rect, Qt.GlobalColor.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            
+            # Рамка вокруг выделения
+            painter.setPen(QColor(0, 200, 0, 255))
+            painter.drawRect(self.current_rect)
+            
+            # Размер области
+            size_text = f"{self.current_rect.width()} x {self.current_rect.height()}"
+            painter.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+            painter.setPen(QColor(255, 255, 255))
+            text_x = self.current_rect.x() + 5
+            text_y = self.current_rect.y() - 10 if self.current_rect.y() > 30 else self.current_rect.bottom() + 20
+            painter.drawText(text_x, text_y, size_text)
+        
+        # Инструкция вверху
         painter.setPen(QColor(255, 255, 255))
-        painter.setFont(painter.font())
-        painter.drawText(
-            self.rect(),
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
-            "\n\n🎯 Выделите область для записи мышкой\nНажмите ESC для отмены"
-        )
+        painter.setFont(QFont("Arial", 16))
+        instruction = "🎯 Зажмите ЛКМ и выделите область для записи  |  ESC = отмена"
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter, 
+                        f"\n\n{instruction}")
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.origin = event.pos()
-            self.rubber_band.setGeometry(QRect(self.origin, self.origin))
-            self.rubber_band.show()
+            self.current_rect = QRect(self.origin, self.origin)
+            self._drawing = True
+            self.update()
     
     def mouseMoveEvent(self, event):
-        if self.rubber_band.isVisible():
-            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+        if self._drawing:
+            self.current_rect = QRect(self.origin, event.pos()).normalized()
+            self.update()
     
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.rubber_band.hide()
+        if event.button() == Qt.MouseButton.LeftButton and self._drawing:
+            self._drawing = False
             rect = QRect(self.origin, event.pos()).normalized()
             
             # Минимальный размер 100x100
             if rect.width() >= 100 and rect.height() >= 100:
-                # Получаем глобальные координаты
                 global_rect = {
                     "left": self.geometry().x() + rect.x(),
                     "top": self.geometry().y() + rect.y(),
@@ -105,6 +127,9 @@ class ScreenRegionSelector(QWidget):
                 
                 if self.callback:
                     self.callback(global_rect)
+            else:
+                if self.callback:
+                    self.callback(None)
             
             self.close()
     
@@ -127,16 +152,17 @@ class MeetingRecorder:
         
         # Настройки видео
         self.fps = 15
-        self.monitor = None  # Номер монитора или регион {left, top, width, height}
+        self.monitor = None
         
         # Настройки аудио
         self.mic_samplerate = 16000
-        self.sys_samplerate = 48000
-        self.mic_device = None  # None = default
+        self.sys_samplerate = 44100
+        self.mic_device = None
         
         # Состояние
         self.is_recording = False
         self._stop_event = threading.Event()
+        self._record_system = True
         
         # Буферы
         self._video_frames = []
@@ -148,10 +174,9 @@ class MeetingRecorder:
         self._mic_thread = None
         self._sys_thread = None
         
-        # Временные файлы
-        self._temp_video = None
-        self._temp_mic = None
-        self._temp_sys = None
+        # PyAudio для системного звука
+        self._pyaudio = None
+        self._loopback_device = None
     
     def get_monitors(self) -> list:
         """Список доступных мониторов"""
@@ -159,7 +184,7 @@ class MeetingRecorder:
             monitors = []
             for i, mon in enumerate(sct.monitors):
                 if i == 0:
-                    continue  # Пропускаем "все мониторы"
+                    continue
                 monitors.append({
                     "id": i,
                     "name": f"Монитор {i}",
@@ -185,15 +210,42 @@ class MeetingRecorder:
         return mics
     
     def get_loopback_device(self):
-        """Найти устройство для захвата системного звука"""
-        if not SOUNDCARD_AVAILABLE:
+        """Найти устройство WASAPI Loopback для захвата системного звука"""
+        if not PYAUDIO_AVAILABLE:
             return None
         
-        mics = sc.all_microphones(include_loopback=True)
-        for mic in mics:
-            if mic.isloopback:
-                return mic
-        return None
+        try:
+            p = pyaudio.PyAudio()
+            
+            # Ищем WASAPI loopback устройство
+            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            
+            # Ищем loopback устройство (обычно содержит "loopback" в названии)
+            for i in range(p.get_device_count()):
+                dev = p.get_device_info_by_index(i)
+                
+                # Проверяем что это WASAPI и loopback
+                if dev.get('hostApi') == wasapi_info['index']:
+                    # Ищем устройство с isLoopbackDevice или с "loopback" в имени
+                    if dev.get('isLoopbackDevice', False) or 'loopback' in dev['name'].lower():
+                        self._loopback_device = dev
+                        p.terminate()
+                        return dev
+                    
+                    # Или это устройство вывода по умолчанию
+                    if dev['maxInputChannels'] > 0 and dev['maxOutputChannels'] == 0:
+                        # Может быть loopback
+                        pass
+            
+            # Если не нашли явный loopback, берём default output device
+            default_output = p.get_default_output_device_info()
+            self._loopback_device = default_output
+            p.terminate()
+            return default_output
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка поиска loopback: {e}")
+            return None
     
     def set_monitor(self, monitor_id: int = 1):
         """Установить монитор для записи"""
@@ -201,11 +253,7 @@ class MeetingRecorder:
             if monitor_id < len(sct.monitors):
                 self.monitor = sct.monitors[monitor_id]
             else:
-                self.monitor = sct.monitors[1]  # Первый реальный монитор
-    
-    def set_region(self, left: int, top: int, width: int, height: int):
-        """Установить регион экрана для записи"""
-        self.monitor = {"left": left, "top": top, "width": width, "height": height}
+                self.monitor = sct.monitors[1]
     
     def _record_video(self):
         """Поток записи видео"""
@@ -215,73 +263,123 @@ class MeetingRecorder:
             while not self._stop_event.is_set():
                 start = time.time()
                 
-                # Захват кадра
-                img = sct.grab(self.monitor)
-                frame = np.array(img)
-                # BGRA -> BGR
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                self._video_frames.append(frame)
+                try:
+                    img = sct.grab(self.monitor)
+                    frame = np.array(img)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    self._video_frames.append(frame)
+                except Exception as e:
+                    print(f"Video error: {e}")
                 
-                # Поддержание FPS
                 elapsed = time.time() - start
                 if elapsed < frame_time:
                     time.sleep(frame_time - elapsed)
     
     def _record_microphone(self):
         """Поток записи микрофона"""
-        chunk_duration = 0.1  # 100ms chunks
-        chunk_samples = int(self.mic_samplerate * chunk_duration)
+        chunk_samples = int(self.mic_samplerate * 0.1)
         
         def callback(indata, frames, time_info, status):
             if status:
-                print(f"Mic status: {status}")
+                print(f"Mic: {status}")
             self._mic_audio.append(indata.copy())
         
-        with sd.InputStream(
-            device=self.mic_device,
-            samplerate=self.mic_samplerate,
-            channels=1,
-            dtype='float32',
-            blocksize=chunk_samples,
-            callback=callback
-        ):
-            while not self._stop_event.is_set():
-                time.sleep(0.05)
+        try:
+            with sd.InputStream(
+                device=self.mic_device,
+                samplerate=self.mic_samplerate,
+                channels=1,
+                dtype='float32',
+                blocksize=chunk_samples,
+                callback=callback
+            ):
+                while not self._stop_event.is_set():
+                    time.sleep(0.05)
+        except Exception as e:
+            print(f"❌ Ошибка записи микрофона: {e}")
     
     def _record_system_audio(self):
-        """Поток записи системного звука (WASAPI Loopback)"""
-        if not SOUNDCARD_AVAILABLE:
+        """Поток записи системного звука через PyAudio WASAPI"""
+        if not PYAUDIO_AVAILABLE:
+            print("⚠️ PyAudio недоступен")
             return
-        
-        loopback = self.get_loopback_device()
-        if not loopback:
-            print("⚠️ Loopback устройство не найдено")
-            return
-        
-        chunk_samples = int(self.sys_samplerate * 0.1)  # 100ms
         
         try:
-            with loopback.recorder(samplerate=self.sys_samplerate, channels=2) as rec:
-                while not self._stop_event.is_set():
-                    data = rec.record(numframes=chunk_samples)
+            p = pyaudio.PyAudio()
+            
+            # Получаем WASAPI host API
+            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_speakers = p.get_device_info_by_index(wasapi_info['defaultOutputDevice'])
+            
+            # Проверяем поддержку loopback
+            if not default_speakers.get('isLoopbackDevice', False):
+                # Ищем loopback версию этого устройства
+                for i in range(p.get_device_count()):
+                    dev = p.get_device_info_by_index(i)
+                    if dev.get('name', '').startswith(default_speakers['name'].split(' (')[0]):
+                        if dev.get('isLoopbackDevice', False):
+                            default_speakers = dev
+                            break
+            
+            channels = int(default_speakers['maxInputChannels'])
+            if channels < 1:
+                channels = 2
+            
+            rate = int(default_speakers['defaultSampleRate'])
+            self.sys_samplerate = rate
+            
+            chunk = int(rate * 0.1)  # 100ms
+            
+            stream = p.open(
+                format=pyaudio.paFloat32,
+                channels=channels,
+                rate=rate,
+                input=True,
+                input_device_index=default_speakers['index'],
+                frames_per_buffer=chunk
+            )
+            
+            print(f"🔊 Системный звук: {default_speakers['name']}")
+            
+            while not self._stop_event.is_set():
+                try:
+                    data = stream.read(chunk, exception_on_overflow=False)
+                    audio_data = np.frombuffer(data, dtype=np.float32)
+                    
                     # Stereo -> Mono
-                    mono = np.mean(data, axis=1)
-                    self._sys_audio.append(mono.astype('float32'))
+                    if channels > 1:
+                        audio_data = audio_data.reshape(-1, channels)
+                        audio_data = np.mean(audio_data, axis=1)
+                    
+                    self._sys_audio.append(audio_data)
+                except Exception as e:
+                    print(f"Sys audio read error: {e}")
+                    time.sleep(0.1)
+            
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            
         except Exception as e:
             print(f"❌ Ошибка записи системного звука: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def start(self, monitor_id: int = None, region: dict = None, mic_device: int = None, record_system: bool = True):
+    def start(self, region: dict = None, mic_device: int = None, record_system: bool = True):
         """
         Начать запись
         
         Args:
-            monitor_id: номер монитора (если region не указан)
-            region: {"left": x, "top": y, "width": w, "height": h} - область записи
+            region: {"left": x, "top": y, "width": w, "height": h} - ОБЯЗАТЕЛЬНО!
             mic_device: ID микрофона
             record_system: записывать ли системный звук
         """
         if self.is_recording:
             print("⚠️ Запись уже идёт")
+            return False
+        
+        if not region:
+            print("❌ Область записи не выбрана!")
             return False
         
         # Очистка
@@ -291,20 +389,12 @@ class MeetingRecorder:
         self._stop_event.clear()
         
         # Настройки области
-        if region:
-            self.monitor = region
-            print(f"▶️ Начинаю запись области: {region['width']}x{region['height']}")
-        elif monitor_id:
-            self.set_monitor(monitor_id)
-            print(f"▶️ Начинаю запись монитора {monitor_id}")
-        else:
-            self.set_monitor(1)
-            print("▶️ Начинаю запись монитора 1")
-        
+        self.monitor = region
         self.mic_device = mic_device
         self._record_system = record_system
         
-        print(f"   Область: {self.monitor}")
+        print(f"▶️ Начинаю запись области: {region['width']}x{region['height']}")
+        print(f"   Позиция: ({region['left']}, {region['top']})")
         print(f"   Микрофон: {mic_device or 'default'}")
         print(f"   Системный звук: {'Да' if record_system else 'Нет'}")
         
@@ -324,12 +414,7 @@ class MeetingRecorder:
         return True
     
     def stop(self) -> dict:
-        """
-        Остановить запись и сохранить файлы
-        
-        Returns:
-            dict: {"video": path, "mic_audio": path, "sys_audio": path, "base_name": name}
-        """
+        """Остановить запись и сохранить файлы"""
         if not self.is_recording:
             print("⚠️ Запись не запущена")
             return None
@@ -340,33 +425,26 @@ class MeetingRecorder:
         
         # Ждём завершения потоков
         if self._video_thread:
-            self._video_thread.join(timeout=2)
+            self._video_thread.join(timeout=3)
         if self._mic_thread:
-            self._mic_thread.join(timeout=2)
+            self._mic_thread.join(timeout=3)
         if self._sys_thread:
-            self._sys_thread.join(timeout=2)
+            self._sys_thread.join(timeout=3)
         
-        # Сохранение
         return self._save_recording()
     
     def _save_recording(self) -> dict:
-        """
-        Сохранить видео и аудио в отдельные файлы
-        
-        Returns:
-            dict: {"video": path, "mic_audio": path, "sys_audio": path}
-        """
+        """Сохранить видео и аудио в отдельные файлы"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"Meeting_{timestamp}"
         
-        # Пути к файлам (в папке записей, НЕ временные)
         video_path = str(self.output_dir / f"{base_name}.avi")
         mic_path = str(self.output_dir / f"{base_name}_mic.wav")
         sys_path = str(self.output_dir / f"{base_name}_sys.wav")
         
         result = {"video": None, "mic_audio": None, "sys_audio": None, "base_name": base_name}
         
-        # === Сохраняем видео ===
+        # === Видео ===
         if self._video_frames:
             print(f"💾 Сохраняю видео ({len(self._video_frames)} кадров)...")
             h, w = self._video_frames[0].shape[:2]
@@ -376,29 +454,23 @@ class MeetingRecorder:
                 out.write(frame)
             out.release()
             result["video"] = video_path
-            print(f"   ✅ Видео: {video_path}")
-        else:
-            print("⚠️ Нет видеокадров")
+            print(f"   ✅ {video_path}")
         
-        # === Сохраняем аудио микрофона ===
+        # === Микрофон ===
         if self._mic_audio:
-            print(f"💾 Сохраняю аудио микрофона...")
+            print(f"💾 Сохраняю микрофон...")
             mic_data = np.concatenate(self._mic_audio)
-            # Flatten если нужно
             if mic_data.ndim > 1:
                 mic_data = mic_data.flatten()
-            # Нормализация
             max_val = np.max(np.abs(mic_data))
             if max_val > 0:
-                mic_data = mic_data / max_val
+                mic_data = mic_data / max_val * 0.9
             mic_int16 = (mic_data * 32767).astype(np.int16)
             wavfile.write(mic_path, self.mic_samplerate, mic_int16)
             result["mic_audio"] = mic_path
-            print(f"   ✅ Микрофон: {mic_path}")
-        else:
-            print("⚠️ Нет аудио микрофона")
+            print(f"   ✅ {mic_path}")
         
-        # === Сохраняем системный звук ===
+        # === Системный звук ===
         if self._sys_audio:
             print(f"💾 Сохраняю системный звук...")
             sys_data = np.concatenate(self._sys_audio)
@@ -406,79 +478,12 @@ class MeetingRecorder:
                 sys_data = sys_data.flatten()
             max_val = np.max(np.abs(sys_data))
             if max_val > 0:
-                sys_data = sys_data / max_val
+                sys_data = sys_data / max_val * 0.9
             sys_int16 = (sys_data * 32767).astype(np.int16)
             wavfile.write(sys_path, self.sys_samplerate, sys_int16)
             result["sys_audio"] = sys_path
-            print(f"   ✅ Системный звук: {sys_path}")
+            print(f"   ✅ {sys_path}")
         else:
-            print("⚠️ Нет системного звука")
+            print("   ⚠️ Системный звук не записан")
         
         return result
-    
-    def select_region(self) -> dict:
-        """
-        Показать диалог выбора области экрана
-        
-        Returns:
-            dict: {"left": x, "top": y, "width": w, "height": h} или None
-        """
-        selected_region = [None]  # Используем список для замыкания
-        
-        def on_selected(region):
-            selected_region[0] = region
-        
-        selector = ScreenRegionSelector(callback=on_selected)
-        selector.show()
-        
-        # Ждём пока пользователь выберет область
-        while selector.isVisible():
-            QApplication.processEvents()
-            time.sleep(0.01)
-        
-        return selected_region[0]
-
-
-# ===== Тестовый запуск =====
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("🎬 ТЕСТ MeetingRecorder")
-    print("="*60)
-    
-    recorder = MeetingRecorder(output_dir="./dev_test/temp_records")
-    
-    # Показать мониторы
-    print("\n📺 Доступные мониторы:")
-    for mon in recorder.get_monitors():
-        print(f"   {mon['id']}: {mon['name']} ({mon['width']}x{mon['height']})")
-    
-    # Показать микрофоны
-    print("\n🎤 Доступные микрофоны:")
-    for mic in recorder.get_microphones():
-        default = "✓" if mic['is_default'] else " "
-        print(f"   [{default}] {mic['id']}: {mic['name']}")
-    
-    # Loopback
-    loopback = recorder.get_loopback_device()
-    if loopback:
-        print(f"\n🔁 Loopback: {loopback.name}")
-    else:
-        print("\n⚠️ Loopback не найден")
-    
-    # Тестовая запись
-    input("\nНажмите Enter для начала 5-секундной тестовой записи...")
-    
-    recorder.start(monitor_id=1)
-    
-    for i in range(5, 0, -1):
-        print(f"   Осталось: {i} сек...")
-        time.sleep(1)
-    
-    output = recorder.stop()
-    
-    if output:
-        print(f"\n✅ Файл сохранён: {output}")
-    else:
-        print("\n❌ Ошибка записи")
-    
-    input("\nНажмите Enter для выхода...")

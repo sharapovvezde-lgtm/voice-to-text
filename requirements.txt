@@ -31,12 +31,7 @@ opencv-python
 Pillow
 
 # Захват системного звука (WASAPI Loopback)
-soundcard
 pyaudiowpatch
-
-# Видео кодирование
-imageio[ffmpeg]
-ffmpeg-python
 
 # Выбор окна для записи
 pygetwindow
