@@ -755,14 +755,15 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         
         if region:
+            # Показываем полные координаты: позиция + размер
             self.region_label.setText(
-                f"✅ Область: {region['width']} x {region['height']} px"
+                f"✅ Область: ({region['left']}, {region['top']}) — {region['width']} x {region['height']} px"
             )
             self.region_label.setStyleSheet("""
                 QLabel { color: #2E7D32; font-weight: bold; padding: 10px;
                         background: #E8F5E9; border-radius: 5px; }
             """)
-            self._log(f"✅ Область: {region['width']}x{region['height']}")
+            self._log(f"✅ Область: pos=({region['left']},{region['top']}) size={region['width']}x{region['height']}")
         else:
             self.region_label.setText("⚠️ Область НЕ выбрана — запись невозможна")
             self.region_label.setStyleSheet("""

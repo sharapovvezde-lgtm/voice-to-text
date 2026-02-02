@@ -31,9 +31,11 @@ class ScreenRegionSelector(QWidget):
         super().__init__()
         self.callback = callback
         self.selection = None
-        self.origin = QPoint()
-        self.current_rect = QRect()
         self._drawing = False
+        
+        # Глобальные координаты начала и конца выделения
+        self._start_global = QPoint()
+        self._end_global = QPoint()
         
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -53,8 +55,8 @@ class ScreenRegionSelector(QWidget):
         min_y = min(s.geometry().y() for s in screens)
         max_x = max(s.geometry().x() + s.geometry().width() for s in screens)
         max_y = max(s.geometry().y() + s.geometry().height() for s in screens)
-        self._screen_offset_x = min_x
-        self._screen_offset_y = min_y
+        self._virtual_x = min_x
+        self._virtual_y = min_y
         self.setGeometry(min_x, min_y, max_x - min_x, max_y - min_y)
     
     def showFullScreen(self):
@@ -64,28 +66,44 @@ class ScreenRegionSelector(QWidget):
         self.activateWindow()
         self.setFocus()
     
+    def _global_to_local(self, global_point):
+        """Конвертировать глобальные координаты экрана в локальные координаты виджета"""
+        return QPoint(global_point.x() - self._virtual_x, global_point.y() - self._virtual_y)
+    
+    def _get_selection_rect_local(self):
+        """Получить прямоугольник выделения в локальных координатах для отрисовки"""
+        start_local = self._global_to_local(self._start_global)
+        end_local = self._global_to_local(self._end_global)
+        return QRect(start_local, end_local).normalized()
+    
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
         
-        if self._drawing and not self.current_rect.isNull() and self.current_rect.width() > 5:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            painter.fillRect(self.current_rect, Qt.GlobalColor.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            
-            pen = QPen(QColor(0, 255, 0), 3)
-            painter.setPen(pen)
-            painter.drawRect(self.current_rect)
-            
-            size_text = f"{self.current_rect.width()} × {self.current_rect.height()}"
-            painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
-            painter.setPen(QColor(255, 255, 0))
-            text_y = self.current_rect.y() - 10
-            if text_y < 25:
-                text_y = self.current_rect.bottom() + 25
-            painter.drawText(self.current_rect.x() + 5, text_y, size_text)
+        if self._drawing:
+            local_rect = self._get_selection_rect_local()
+            if local_rect.width() > 5 and local_rect.height() > 5:
+                # Очищаем область выделения (делаем прозрачной)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+                painter.fillRect(local_rect, Qt.GlobalColor.transparent)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                
+                # Зелёная рамка
+                pen = QPen(QColor(0, 255, 0), 3)
+                painter.setPen(pen)
+                painter.drawRect(local_rect)
+                
+                # Размер и координаты
+                size_text = f"{local_rect.width()} × {local_rect.height()}  📍({self._start_global.x()}, {self._start_global.y()})"
+                painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+                painter.setPen(QColor(255, 255, 0))
+                text_y = local_rect.y() - 10
+                if text_y < 25:
+                    text_y = local_rect.bottom() + 25
+                painter.drawText(local_rect.x() + 5, text_y, size_text)
         
+        # Инструкция
         painter.setPen(QColor(255, 255, 255))
         painter.setFont(QFont("Arial", 20, QFont.Weight.Bold))
         painter.drawText(self.rect().adjusted(0, 50, 0, 0), 
@@ -98,34 +116,48 @@ class ScreenRegionSelector(QWidget):
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.origin = event.pos()
-            self.current_rect = QRect(self.origin, self.origin)
+            # Используем глобальные координаты!
+            global_pos = event.globalPosition().toPoint()
+            self._start_global = global_pos
+            self._end_global = global_pos
             self._drawing = True
             self.update()
     
     def mouseMoveEvent(self, event):
         if self._drawing:
-            self.current_rect = QRect(self.origin, event.pos()).normalized()
+            self._end_global = event.globalPosition().toPoint()
             self.update()
     
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._drawing:
             self._drawing = False
-            rect = QRect(self.origin, event.pos()).normalized()
+            self._end_global = event.globalPosition().toPoint()
             
-            if rect.width() >= 50 and rect.height() >= 50:
+            # Вычисляем прямоугольник в ГЛОБАЛЬНЫХ координатах экрана
+            x1 = min(self._start_global.x(), self._end_global.x())
+            y1 = min(self._start_global.y(), self._end_global.y())
+            x2 = max(self._start_global.x(), self._end_global.x())
+            y2 = max(self._start_global.y(), self._end_global.y())
+            
+            width = x2 - x1
+            height = y2 - y1
+            
+            if width >= 50 and height >= 50:
                 global_rect = {
-                    "left": self._screen_offset_x + rect.x(),
-                    "top": self._screen_offset_y + rect.y(),
-                    "width": rect.width(),
-                    "height": rect.height()
+                    "left": x1,
+                    "top": y1,
+                    "width": width,
+                    "height": height
                 }
+                print(f"🎯 Выбрана область: left={x1}, top={y1}, width={width}, height={height}")
                 self.selection = global_rect
                 self.hide()
                 if self.callback:
                     self.callback(global_rect)
             else:
-                self.current_rect = QRect()
+                # Слишком маленькая область
+                self._start_global = QPoint()
+                self._end_global = QPoint()
                 self.update()
     
     def keyPressEvent(self, event):
@@ -203,7 +235,8 @@ class MeetingRecorder:
     
     def _record_video(self):
         """Поток записи видео"""
-        print("📹 Видео: старт")
+        print(f"📹 Видео: старт (область: {self.monitor})")
+        first_frame = True
         with mss.mss() as sct:
             frame_time = 1.0 / self.fps
             while not self._stop_event.is_set():
@@ -211,6 +244,9 @@ class MeetingRecorder:
                 try:
                     img = sct.grab(self.monitor)
                     frame = np.array(img)
+                    if first_frame:
+                        print(f"   Первый кадр: {frame.shape[1]}x{frame.shape[0]} px")
+                        first_frame = False
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                     self._video_frames.append(frame)
                 except Exception as e:
@@ -270,7 +306,8 @@ class MeetingRecorder:
         self.monitor = region
         self.mic_device = mic_device
         
-        print(f"▶️ Запись: {region['width']}x{region['height']}")
+        print(f"▶️ Запись области: left={region['left']}, top={region['top']}, "
+              f"width={region['width']}, height={region['height']}")
         
         self.is_recording = True
         
