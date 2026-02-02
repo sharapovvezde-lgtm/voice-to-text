@@ -402,59 +402,10 @@ class MainWindow(QMainWindow):
         mic_row.addWidget(self.meeting_mic_combo, 1)
         audio_layout.addLayout(mic_row)
         
-        # Системный звук
-        sys_row = QHBoxLayout()
-        self.sys_audio_cb = QCheckBox("🔊 Системный звук (Собеседник)")
-        self.sys_audio_cb.setChecked(True)
-        self.sys_audio_cb.setStyleSheet("font-weight: bold;")
-        sys_row.addWidget(self.sys_audio_cb)
-        
-        # Статус loopback - проверяем наличие pyaudiowpatch
-        try:
-            import pyaudiowpatch as pa
-            p = pa.PyAudio()
-            loopback_found = False
-            loopback_name = ""
-            
-            for i in range(p.get_device_count()):
-                try:
-                    dev = p.get_device_info_by_index(i)
-                    if dev.get('isLoopbackDevice', False):
-                        loopback_found = True
-                        loopback_name = dev['name'][:20]
-                        break
-                except:
-                    continue
-            
-            if not loopback_found:
-                # Попробуем default output
-                try:
-                    wasapi = p.get_host_api_info_by_type(pa.paWASAPI)
-                    if wasapi.get('defaultOutputDevice', -1) >= 0:
-                        loopback_found = True
-                        loopback_name = "Default Output"
-                except:
-                    pass
-            
-            p.terminate()
-            
-            if loopback_found:
-                self.loopback_label = QLabel(f"✅ {loopback_name}")
-                self.loopback_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
-            else:
-                self.loopback_label = QLabel("⚠️ Нужен pyaudiowpatch")
-                self.loopback_label.setStyleSheet("color: #FF9800;")
-        except ImportError:
-            self.loopback_label = QLabel("❌ pyaudiowpatch не установлен")
-            self.loopback_label.setStyleSheet("color: #c62828;")
-            self.sys_audio_cb.setEnabled(False)
-        except Exception as e:
-            self.loopback_label = QLabel(f"⚠️ {str(e)[:20]}")
-            self.loopback_label.setStyleSheet("color: #FF9800;")
-        
-        sys_row.addWidget(self.loopback_label)
-        sys_row.addStretch()
-        audio_layout.addLayout(sys_row)
+        # Информация о записи
+        info_label = QLabel("💡 Будет записан звук с выбранного микрофона")
+        info_label.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
+        audio_layout.addWidget(info_label)
         
         layout.addWidget(audio_group)
         
@@ -835,14 +786,12 @@ class MainWindow(QMainWindow):
             return
         
         mic_id = self.meeting_mic_combo.currentData()
-        record_system = self.sys_audio_cb.isChecked()
         
         self._log(f"📹 Запись: {self._selected_region['width']}x{self._selected_region['height']}")
         
         success = self.meeting_recorder.start(
             region=self._selected_region,
-            mic_device=mic_id,
-            record_system=record_system
+            mic_device=mic_id
         )
         
         if success:
@@ -893,11 +842,7 @@ class MainWindow(QMainWindow):
             if result.get("video"):
                 self._log(f"✅ Видео сохранено")
             if result.get("mic_audio"):
-                self._log(f"✅ Микрофон сохранён")
-            if result.get("sys_audio"):
-                self._log(f"✅ Сист.звук сохранён")
-            elif self.sys_audio_cb.isChecked():
-                self._log("⚠️ Сист.звук не записан")
+                self._log(f"✅ Аудио сохранено")
             self._refresh_recordings()
     
     def _update_meeting_timer(self):
@@ -911,26 +856,32 @@ class MainWindow(QMainWindow):
         records_dir = Path(DEV_DIR) / "temp_records"
         
         if records_dir.exists():
-            files = sorted(records_dir.glob("Meeting_*.avi"), key=os.path.getmtime, reverse=True)
+            # Ищем MP4 файлы (со звуком)
+            files = sorted(records_dir.glob("Meeting_*.mp4"), key=os.path.getmtime, reverse=True)
+            
+            # Также ищем AVI если MP4 нет
+            if not files:
+                files = sorted(records_dir.glob("Meeting_*.avi"), key=os.path.getmtime, reverse=True)
             
             for f in files[:10]:
                 base_name = f.stem
                 mic_exists = (records_dir / f"{base_name}_mic.wav").exists()
-                sys_exists = (records_dir / f"{base_name}_sys.wav").exists()
                 
-                icons = ""
-                if mic_exists:
-                    icons += "🎤"
-                if sys_exists:
-                    icons += "🔊"
+                icons = " 🎤" if mic_exists else ""
                 
-                item = QListWidgetItem(f"📹 {f.name} {icons}")
+                item = QListWidgetItem(f"📹 {f.name}{icons}")
                 item.setData(Qt.ItemDataRole.UserRole, base_name)
                 self.recordings_list.addItem(item)
     
     def _open_recording(self, item):
         base_name = item.data(Qt.ItemDataRole.UserRole)
-        video_path = Path(DEV_DIR) / "temp_records" / f"{base_name}.avi"
+        records_dir = Path(DEV_DIR) / "temp_records"
+        
+        # Сначала ищем MP4
+        video_path = records_dir / f"{base_name}.mp4"
+        if not video_path.exists():
+            video_path = records_dir / f"{base_name}.avi"
+        
         if video_path.exists():
             os.startfile(str(video_path))
     
