@@ -84,41 +84,8 @@ class MeetingTranscriber:
         
         return segments
     
-    def extract_audio_from_video(self, video_path: str, track: int = 0) -> str:
-        """
-        Извлечь аудиодорожку из видео
-        
-        Args:
-            video_path: путь к видеофайлу
-            track: номер аудиодорожки (0 = первая/микрофон, 1 = вторая/система)
-        
-        Returns:
-            путь к WAV файлу
-        """
-        import subprocess
-        
-        temp_wav = tempfile.mktemp(suffix=f"_track{track}.wav")
-        
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', video_path,
-            '-map', f'0:a:{track}',  # Выбираем нужную дорожку
-            '-ac', '1',  # Моно
-            '-ar', '16000',  # 16kHz для Whisper
-            temp_wav
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print(f"⚠️ FFmpeg ошибка: {result.stderr}")
-            return None
-        
-        return temp_wav
-    
     def transcribe_meeting(
         self,
-        video_path: str = None,
         mic_audio_path: str = None,
         sys_audio_path: str = None,
         language: str = "ru"
@@ -127,44 +94,50 @@ class MeetingTranscriber:
         Транскрибировать встречу с разделением спикеров
         
         Args:
-            video_path: путь к MP4 с двумя аудиодорожками
-            mic_audio_path: путь к WAV микрофона (опционально, если нет video_path)
-            sys_audio_path: путь к WAV системного звука (опционально)
+            mic_audio_path: путь к WAV микрофона ("Я")
+            sys_audio_path: путь к WAV системного звука ("Собеседник")
             language: язык для распознавания
         
         Returns:
             dict: {"segments": [...], "full_text": "..."}
         """
-        temp_files = []
-        
-        # Если передан видеофайл - извлекаем аудио
-        if video_path:
-            print("📼 Извлекаю аудиодорожки из видео...")
-            mic_audio_path = self.extract_audio_from_video(video_path, track=0)
-            if mic_audio_path:
-                temp_files.append(mic_audio_path)
-            
-            sys_audio_path = self.extract_audio_from_video(video_path, track=1)
-            if sys_audio_path:
-                temp_files.append(sys_audio_path)
-        
         all_segments = []
         
         # Транскрибируем микрофон ("Я")
         if mic_audio_path and os.path.exists(mic_audio_path):
             print("\n🎤 Транскрибирую микрофон (Я)...")
-            mic_segments = self.transcribe_audio(mic_audio_path, language)
-            for seg in mic_segments:
-                seg["speaker"] = "Я"
-            all_segments.extend(mic_segments)
+            try:
+                mic_segments = self.transcribe_audio(mic_audio_path, language)
+                for seg in mic_segments:
+                    seg["speaker"] = "Я"
+                all_segments.extend(mic_segments)
+                print(f"   ✅ Найдено {len(mic_segments)} сегментов")
+            except Exception as e:
+                print(f"   ❌ Ошибка: {e}")
+        else:
+            print(f"⚠️ Файл микрофона не найден: {mic_audio_path}")
         
         # Транскрибируем системный звук ("Собеседник")
         if sys_audio_path and os.path.exists(sys_audio_path):
             print("\n🔊 Транскрибирую системный звук (Собеседник)...")
-            sys_segments = self.transcribe_audio(sys_audio_path, language)
-            for seg in sys_segments:
-                seg["speaker"] = "Собеседник"
-            all_segments.extend(sys_segments)
+            try:
+                sys_segments = self.transcribe_audio(sys_audio_path, language)
+                for seg in sys_segments:
+                    seg["speaker"] = "Собеседник"
+                all_segments.extend(sys_segments)
+                print(f"   ✅ Найдено {len(sys_segments)} сегментов")
+            except Exception as e:
+                print(f"   ❌ Ошибка: {e}")
+        else:
+            if sys_audio_path:
+                print(f"⚠️ Файл системного звука не найден: {sys_audio_path}")
+        
+        if not all_segments:
+            print("⚠️ Не найдено ни одного сегмента для транскрибации")
+            return {
+                "segments": [],
+                "full_text": "(Пусто - речь не распознана)"
+            }
         
         # Сортируем по времени
         all_segments.sort(key=lambda x: x["start"])
@@ -174,14 +147,6 @@ class MeetingTranscriber:
         
         # Формируем полный текст
         full_text = self._format_transcript(merged_segments)
-        
-        # Очистка временных файлов
-        for f in temp_files:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except:
-                    pass
         
         return {
             "segments": merged_segments,

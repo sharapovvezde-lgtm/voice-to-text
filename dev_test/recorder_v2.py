@@ -3,7 +3,7 @@ Meeting Recorder v2 — Универсальный захват экрана + 2
 - Видео: захват экрана/окна через mss (высокий FPS)
 - Аудио 1: Микрофон (голос пользователя = "Я")
 - Аудио 2: Системный звук WASAPI Loopback (голос собеседника)
-- Выход: .mp4 с двумя аудиодорожками
+- Выход: .avi + отдельные WAV файлы для транскрибации
 """
 import os
 import sys
@@ -27,6 +27,93 @@ try:
 except ImportError:
     SOUNDCARD_AVAILABLE = False
     print("⚠️ soundcard не установлен. Loopback недоступен.")
+
+
+# ===== Виджет выбора области экрана =====
+from PyQt6.QtWidgets import QWidget, QApplication, QRubberBand
+from PyQt6.QtCore import Qt, QRect, QPoint
+from PyQt6.QtGui import QPainter, QColor, QScreen
+
+
+class ScreenRegionSelector(QWidget):
+    """
+    Полноэкранный виджет для выбора области записи мышкой
+    """
+    
+    def __init__(self, callback=None):
+        super().__init__()
+        self.callback = callback
+        self.selection = None
+        self.origin = QPoint()
+        
+        # Полноэкранный полупрозрачный оверлей
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        
+        # Получаем размер всех мониторов
+        screen = QApplication.primaryScreen()
+        geometry = screen.virtualGeometry()
+        self.setGeometry(geometry)
+        
+        # Рамка выделения
+        self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        # Полупрозрачный тёмный фон
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        
+        # Инструкция
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(painter.font())
+        painter.drawText(
+            self.rect(),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+            "\n\n🎯 Выделите область для записи мышкой\nНажмите ESC для отмены"
+        )
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.origin = event.pos()
+            self.rubber_band.setGeometry(QRect(self.origin, self.origin))
+            self.rubber_band.show()
+    
+    def mouseMoveEvent(self, event):
+        if self.rubber_band.isVisible():
+            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+    
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.rubber_band.hide()
+            rect = QRect(self.origin, event.pos()).normalized()
+            
+            # Минимальный размер 100x100
+            if rect.width() >= 100 and rect.height() >= 100:
+                # Получаем глобальные координаты
+                global_rect = {
+                    "left": self.geometry().x() + rect.x(),
+                    "top": self.geometry().y() + rect.y(),
+                    "width": rect.width(),
+                    "height": rect.height()
+                }
+                self.selection = global_rect
+                
+                if self.callback:
+                    self.callback(global_rect)
+            
+            self.close()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.selection = None
+            if self.callback:
+                self.callback(None)
+            self.close()
 
 
 class MeetingRecorder:
@@ -183,8 +270,16 @@ class MeetingRecorder:
         except Exception as e:
             print(f"❌ Ошибка записи системного звука: {e}")
     
-    def start(self, monitor_id: int = 1, mic_device: int = None):
-        """Начать запись"""
+    def start(self, monitor_id: int = None, region: dict = None, mic_device: int = None, record_system: bool = True):
+        """
+        Начать запись
+        
+        Args:
+            monitor_id: номер монитора (если region не указан)
+            region: {"left": x, "top": y, "width": w, "height": h} - область записи
+            mic_device: ID микрофона
+            record_system: записывать ли системный звук
+        """
         if self.is_recording:
             print("⚠️ Запись уже идёт")
             return False
@@ -195,29 +290,46 @@ class MeetingRecorder:
         self._sys_audio = []
         self._stop_event.clear()
         
-        # Настройки
-        self.set_monitor(monitor_id)
-        self.mic_device = mic_device
+        # Настройки области
+        if region:
+            self.monitor = region
+            print(f"▶️ Начинаю запись области: {region['width']}x{region['height']}")
+        elif monitor_id:
+            self.set_monitor(monitor_id)
+            print(f"▶️ Начинаю запись монитора {monitor_id}")
+        else:
+            self.set_monitor(1)
+            print("▶️ Начинаю запись монитора 1")
         
-        print(f"▶️ Начинаю запись...")
-        print(f"   Монитор: {self.monitor}")
+        self.mic_device = mic_device
+        self._record_system = record_system
+        
+        print(f"   Область: {self.monitor}")
         print(f"   Микрофон: {mic_device or 'default'}")
+        print(f"   Системный звук: {'Да' if record_system else 'Нет'}")
         
         self.is_recording = True
         
         # Запуск потоков
         self._video_thread = threading.Thread(target=self._record_video, daemon=True)
         self._mic_thread = threading.Thread(target=self._record_microphone, daemon=True)
-        self._sys_thread = threading.Thread(target=self._record_system_audio, daemon=True)
         
         self._video_thread.start()
         self._mic_thread.start()
-        self._sys_thread.start()
+        
+        if record_system:
+            self._sys_thread = threading.Thread(target=self._record_system_audio, daemon=True)
+            self._sys_thread.start()
         
         return True
     
-    def stop(self) -> str:
-        """Остановить запись и сохранить файл"""
+    def stop(self) -> dict:
+        """
+        Остановить запись и сохранить файлы
+        
+        Returns:
+            dict: {"video": path, "mic_audio": path, "sys_audio": path, "base_name": name}
+        """
         if not self.is_recording:
             print("⚠️ Запись не запущена")
             return None
@@ -237,16 +349,22 @@ class MeetingRecorder:
         # Сохранение
         return self._save_recording()
     
-    def _save_recording(self) -> str:
-        """Сохранить видео и аудио в файл"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _save_recording(self) -> dict:
+        """
+        Сохранить видео и аудио в отдельные файлы
         
-        # Создаём временные файлы
-        temp_dir = tempfile.gettempdir()
-        video_path = os.path.join(temp_dir, f"video_{timestamp}.avi")
-        mic_path = os.path.join(temp_dir, f"mic_{timestamp}.wav")
-        sys_path = os.path.join(temp_dir, f"sys_{timestamp}.wav")
-        output_path = str(self.output_dir / f"Meeting_{timestamp}.mp4")
+        Returns:
+            dict: {"video": path, "mic_audio": path, "sys_audio": path}
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"Meeting_{timestamp}"
+        
+        # Пути к файлам (в папке записей, НЕ временные)
+        video_path = str(self.output_dir / f"{base_name}.avi")
+        mic_path = str(self.output_dir / f"{base_name}_mic.wav")
+        sys_path = str(self.output_dir / f"{base_name}_sys.wav")
+        
+        result = {"video": None, "mic_audio": None, "sys_audio": None, "base_name": base_name}
         
         # === Сохраняем видео ===
         if self._video_frames:
@@ -257,100 +375,68 @@ class MeetingRecorder:
             for frame in self._video_frames:
                 out.write(frame)
             out.release()
+            result["video"] = video_path
+            print(f"   ✅ Видео: {video_path}")
         else:
             print("⚠️ Нет видеокадров")
-            return None
         
         # === Сохраняем аудио микрофона ===
         if self._mic_audio:
             print(f"💾 Сохраняю аудио микрофона...")
             mic_data = np.concatenate(self._mic_audio)
+            # Flatten если нужно
+            if mic_data.ndim > 1:
+                mic_data = mic_data.flatten()
             # Нормализация
-            mic_data = mic_data / (np.max(np.abs(mic_data)) + 1e-8)
+            max_val = np.max(np.abs(mic_data))
+            if max_val > 0:
+                mic_data = mic_data / max_val
             mic_int16 = (mic_data * 32767).astype(np.int16)
             wavfile.write(mic_path, self.mic_samplerate, mic_int16)
+            result["mic_audio"] = mic_path
+            print(f"   ✅ Микрофон: {mic_path}")
+        else:
+            print("⚠️ Нет аудио микрофона")
         
         # === Сохраняем системный звук ===
         if self._sys_audio:
             print(f"💾 Сохраняю системный звук...")
             sys_data = np.concatenate(self._sys_audio)
-            sys_data = sys_data / (np.max(np.abs(sys_data)) + 1e-8)
+            if sys_data.ndim > 1:
+                sys_data = sys_data.flatten()
+            max_val = np.max(np.abs(sys_data))
+            if max_val > 0:
+                sys_data = sys_data / max_val
             sys_int16 = (sys_data * 32767).astype(np.int16)
             wavfile.write(sys_path, self.sys_samplerate, sys_int16)
+            result["sys_audio"] = sys_path
+            print(f"   ✅ Системный звук: {sys_path}")
+        else:
+            print("⚠️ Нет системного звука")
         
-        # === Объединяем через FFmpeg ===
-        print(f"🎬 Объединяю в MP4...")
-        output_path = self._merge_with_ffmpeg(
-            video_path, mic_path, sys_path, output_path
-        )
-        
-        # Очистка временных файлов
-        for f in [video_path, mic_path, sys_path]:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except:
-                    pass
-        
-        return output_path
+        return result
     
-    def _merge_with_ffmpeg(self, video_path, mic_path, sys_path, output_path) -> str:
-        """Объединить видео и аудио через FFmpeg"""
-        import subprocess
+    def select_region(self) -> dict:
+        """
+        Показать диалог выбора области экрана
         
-        # Проверяем наличие ffmpeg
-        try:
-            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        except:
-            print("⚠️ FFmpeg не найден! Сохраняю только видео без звука.")
-            # Копируем видео как есть
-            import shutil
-            output_avi = output_path.replace('.mp4', '.avi')
-            shutil.copy(video_path, output_avi)
-            return output_avi
+        Returns:
+            dict: {"left": x, "top": y, "width": w, "height": h} или None
+        """
+        selected_region = [None]  # Используем список для замыкания
         
-        # FFmpeg команда: видео + 2 аудиодорожки
-        cmd = ['ffmpeg', '-y']
+        def on_selected(region):
+            selected_region[0] = region
         
-        # Входные файлы
-        cmd.extend(['-i', video_path])
-        if os.path.exists(mic_path):
-            cmd.extend(['-i', mic_path])
-        if os.path.exists(sys_path):
-            cmd.extend(['-i', sys_path])
+        selector = ScreenRegionSelector(callback=on_selected)
+        selector.show()
         
-        # Маппинг потоков
-        cmd.extend(['-map', '0:v'])  # Видео
-        if os.path.exists(mic_path):
-            cmd.extend(['-map', '1:a'])  # Аудио микрофона
-        if os.path.exists(sys_path):
-            idx = 2 if os.path.exists(mic_path) else 1
-            cmd.extend(['-map', f'{idx}:a'])  # Системный звук
+        # Ждём пока пользователь выберет область
+        while selector.isVisible():
+            QApplication.processEvents()
+            time.sleep(0.01)
         
-        # Кодеки
-        cmd.extend([
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '23',
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-shortest',
-            output_path
-        ])
-        
-        print(f"   FFmpeg: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print(f"❌ FFmpeg ошибка: {result.stderr}")
-            return video_path
-        
-        print(f"✅ Сохранено: {output_path}")
-        return output_path
-    
-    def get_audio_paths(self) -> tuple:
-        """Вернуть пути к аудиофайлам для транскрибации"""
-        return self._temp_mic, self._temp_sys
+        return selected_region[0]
 
 
 # ===== Тестовый запуск =====

@@ -126,25 +126,40 @@ class MeetingTranscribeWorker(QThread):
     finished = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, transcriber: MeetingTranscriber, video_path: str):
+    def __init__(self, transcriber: MeetingTranscriber, mic_path: str, sys_path: str, output_dir: str):
         super().__init__()
         self.transcriber = transcriber
-        self.video_path = video_path
+        self.mic_path = mic_path
+        self.sys_path = sys_path
+        self.output_dir = output_dir
     
     def run(self):
         try:
-            self.progress.emit("Загрузка модели...")
+            self.progress.emit("Загрузка модели Whisper...")
             self.transcriber.load_model()
             
-            self.progress.emit("Транскрибация...")
-            result = self.transcriber.transcribe_meeting(video_path=self.video_path)
+            self.progress.emit("Транскрибация аудио...")
+            result = self.transcriber.transcribe_meeting(
+                mic_audio_path=self.mic_path,
+                sys_audio_path=self.sys_path
+            )
             
             self.progress.emit("Сохранение отчёта...")
-            report_path = self.transcriber.save_report(result, video_path=self.video_path)
+            # Определяем путь для отчёта
+            if self.mic_path:
+                base = Path(self.mic_path).stem.replace("_mic", "")
+                report_path = str(Path(self.output_dir) / f"{base}_transcript.txt")
+            else:
+                from datetime import datetime
+                report_path = str(Path(self.output_dir) / f"Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+            
+            report_path = self.transcriber.save_report(result, output_path=report_path)
             result["report_path"] = report_path
             
             self.finished.emit(result)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.finished.emit({"error": str(e)})
 
 
@@ -178,6 +193,7 @@ class MainWindow(QMainWindow):
         self._recording = False
         self._processing = False
         self._meeting_recording = False
+        self._last_recording = None  # Результат последней записи встречи
         
         self._init_ui()
         self._init_tray()
@@ -329,41 +345,63 @@ class MainWindow(QMainWindow):
     def _build_meeting_tab(self, lay):
         """Вкладка записи встреч"""
         
-        # === ВЫБОР ИСТОЧНИКА ===
-        src_group = QGroupBox("📺 Источник записи")
-        src_lay = QVBoxLayout(src_group)
+        # Хранение выбранной области
+        self._selected_region = None
         
-        # Монитор
+        # === ВЫБОР ОБЛАСТИ ===
+        area_group = QGroupBox("🎯 Область записи")
+        area_lay = QVBoxLayout(area_group)
+        
+        # Кнопка выбора области
+        btn_select_region = QPushButton("📐 Выбрать область экрана")
+        btn_select_region.setStyleSheet("background: #9C27B0; font-size: 13px; padding: 10px;")
+        btn_select_region.clicked.connect(self._select_screen_region)
+        area_lay.addWidget(btn_select_region)
+        
+        # Метка с выбранной областью
+        self.region_label = QLabel("Область не выбрана (будет записан весь монитор)")
+        self.region_label.setStyleSheet("color: #666; padding: 5px;")
+        self.region_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        area_lay.addWidget(self.region_label)
+        
+        # Монитор (запасной вариант)
         mon_lay = QHBoxLayout()
-        mon_lay.addWidget(QLabel("Монитор:"))
+        mon_lay.addWidget(QLabel("Или монитор:"))
         self.monitor_combo = QComboBox()
         self._refresh_monitors()
         mon_lay.addWidget(self.monitor_combo, 1)
-        src_lay.addLayout(mon_lay)
+        area_lay.addLayout(mon_lay)
+        
+        lay.addWidget(area_group)
+        
+        # === АУДИО ===
+        audio_group = QGroupBox("🎤 Источники звука")
+        audio_lay = QVBoxLayout(audio_group)
         
         # Микрофон для встреч
         mic_lay = QHBoxLayout()
-        mic_lay.addWidget(QLabel("Микрофон:"))
+        mic_lay.addWidget(QLabel("Микрофон (Я):"))
         self.meeting_mic_combo = QComboBox()
         self._refresh_meeting_mics()
         mic_lay.addWidget(self.meeting_mic_combo, 1)
-        src_lay.addLayout(mic_lay)
+        audio_lay.addLayout(mic_lay)
         
         # Системный звук
         sys_lay = QHBoxLayout()
-        self.sys_audio_cb = QCheckBox("Записывать системный звук (собеседник)")
+        self.sys_audio_cb = QCheckBox("Системный звук (Собеседник)")
         self.sys_audio_cb.setChecked(True)
         sys_lay.addWidget(self.sys_audio_cb)
         
         loopback = self.meeting_recorder.get_loopback_device()
         if loopback:
-            sys_lay.addWidget(QLabel(f"✓ {loopback.name[:30]}..."))
+            loopback_name = loopback.name[:25] + "..." if len(loopback.name) > 25 else loopback.name
+            sys_lay.addWidget(QLabel(f"✓ {loopback_name}"))
         else:
             self.sys_audio_cb.setEnabled(False)
             sys_lay.addWidget(QLabel("❌ Loopback не найден"))
         
-        src_lay.addLayout(sys_lay)
-        lay.addWidget(src_group)
+        audio_lay.addLayout(sys_lay)
+        lay.addWidget(audio_group)
         
         # === КНОПКИ УПРАВЛЕНИЯ ===
         ctrl_group = QGroupBox("⏯️ Управление")
@@ -704,30 +742,86 @@ class MainWindow(QMainWindow):
         records_dir = Path(DEV_DIR) / "temp_records"
         
         if records_dir.exists():
-            files = sorted(records_dir.glob("*.mp4"), key=os.path.getmtime, reverse=True)
-            for f in files[:10]:  # Последние 10
-                item = QListWidgetItem(f"📹 {f.name}")
-                item.setData(Qt.ItemDataRole.UserRole, str(f))
-                self.recordings_list.addItem(item)
+            # Ищем AVI файлы (основные видеозаписи)
+            files = sorted(records_dir.glob("Meeting_*.avi"), key=os.path.getmtime, reverse=True)
             
-            # Также показать .avi если нет mp4
-            if not files:
-                files = sorted(records_dir.glob("*.avi"), key=os.path.getmtime, reverse=True)
-                for f in files[:10]:
-                    item = QListWidgetItem(f"📹 {f.name}")
-                    item.setData(Qt.ItemDataRole.UserRole, str(f))
-                    self.recordings_list.addItem(item)
+            for f in files[:10]:  # Последние 10
+                base_name = f.stem  # Meeting_20260202_123456
+                
+                # Проверяем наличие аудиофайлов
+                mic_exists = (records_dir / f"{base_name}_mic.wav").exists()
+                sys_exists = (records_dir / f"{base_name}_sys.wav").exists()
+                
+                # Формируем метку
+                audio_status = ""
+                if mic_exists and sys_exists:
+                    audio_status = " 🎤🔊"
+                elif mic_exists:
+                    audio_status = " 🎤"
+                elif sys_exists:
+                    audio_status = " 🔊"
+                
+                item = QListWidgetItem(f"📹 {f.name}{audio_status}")
+                # Сохраняем base_name для поиска связанных файлов
+                item.setData(Qt.ItemDataRole.UserRole, base_name)
+                self.recordings_list.addItem(item)
+    
+    def _select_screen_region(self):
+        """Показать диалог выбора области экрана"""
+        from recorder_v2 import ScreenRegionSelector
+        
+        self._log("🎯 Выберите область экрана мышкой...")
+        self.hide()  # Скрываем окно
+        
+        # Небольшая задержка чтобы окно успело скрыться
+        QApplication.processEvents()
+        time.sleep(0.3)
+        
+        def on_region_selected(region):
+            self._selected_region = region
+            self.show()
+            
+            if region:
+                self.region_label.setText(
+                    f"✅ Выбрано: {region['width']}x{region['height']} "
+                    f"(x:{region['left']}, y:{region['top']})"
+                )
+                self.region_label.setStyleSheet("color: #4CAF50; font-weight: bold; padding: 5px;")
+                self._log(f"✅ Область выбрана: {region['width']}x{region['height']}")
+            else:
+                self.region_label.setText("❌ Выбор отменён")
+                self.region_label.setStyleSheet("color: #f44; padding: 5px;")
+                self._log("❌ Выбор области отменён")
+        
+        selector = ScreenRegionSelector(callback=on_region_selected)
+        selector.show()
     
     def _start_meeting_recording(self):
         if self._meeting_recording or self._recording:
             return
         
-        monitor_id = self.monitor_combo.currentData() or 1
         mic_id = self.meeting_mic_combo.currentData()
+        record_system = self.sys_audio_cb.isChecked()
         
-        self._log(f"📹 Начинаю запись встречи (монитор {monitor_id})...")
+        # Используем выбранную область или монитор
+        if self._selected_region:
+            region = self._selected_region
+            self._log(f"📹 Запись области {region['width']}x{region['height']}...")
+            success = self.meeting_recorder.start(
+                region=region,
+                mic_device=mic_id,
+                record_system=record_system
+            )
+        else:
+            monitor_id = self.monitor_combo.currentData() or 1
+            self._log(f"📹 Запись монитора {monitor_id}...")
+            success = self.meeting_recorder.start(
+                monitor_id=monitor_id,
+                mic_device=mic_id,
+                record_system=record_system
+            )
         
-        if self.meeting_recorder.start(monitor_id=monitor_id, mic_device=mic_id):
+        if success:
             self._meeting_recording = True
             self._meeting_start_time = time.time()
             self._meeting_timer.start(1000)
@@ -755,7 +849,8 @@ class MainWindow(QMainWindow):
         self._meeting_timer.stop()
         self.indicator.stop()
         
-        output_path = self.meeting_recorder.stop()
+        # stop() теперь возвращает dict
+        result = self.meeting_recorder.stop()
         
         self.meeting_status.setText("⏸️ Готов к записи")
         self.meeting_status.setStyleSheet("font-size: 13px; padding: 8px; background: #333; color: #fff; border-radius: 4px;")
@@ -763,8 +858,15 @@ class MainWindow(QMainWindow):
         self.btn_start_meeting.setEnabled(True)
         self.btn_stop_meeting.setEnabled(False)
         
-        if output_path:
-            self._log(f"✅ Сохранено: {output_path}")
+        # Сохраняем результат для транскрибации
+        self._last_recording = result
+        
+        if result and result.get("video"):
+            self._log(f"✅ Видео: {os.path.basename(result['video'])}")
+            if result.get("mic_audio"):
+                self._log(f"✅ Микрофон: {os.path.basename(result['mic_audio'])}")
+            if result.get("sys_audio"):
+                self._log(f"✅ Сист.звук: {os.path.basename(result['sys_audio'])}")
             self._refresh_recordings()
         else:
             self._log("❌ Ошибка сохранения")
@@ -778,9 +880,12 @@ class MainWindow(QMainWindow):
             self.meeting_timer_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
     
     def _open_recording(self, item):
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if path and os.path.exists(path):
-            os.startfile(path)
+        base_name = item.data(Qt.ItemDataRole.UserRole)
+        records_dir = Path(DEV_DIR) / "temp_records"
+        video_path = records_dir / f"{base_name}.avi"
+        
+        if video_path.exists():
+            os.startfile(str(video_path))
     
     def _transcribe_selected(self):
         item = self.recordings_list.currentItem()
@@ -788,16 +893,39 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Выберите запись для транскрибации")
             return
         
-        video_path = item.data(Qt.ItemDataRole.UserRole)
-        if not video_path or not os.path.exists(video_path):
-            QMessageBox.warning(self, "Ошибка", "Файл не найден")
+        base_name = item.data(Qt.ItemDataRole.UserRole)
+        records_dir = Path(DEV_DIR) / "temp_records"
+        
+        # Пути к аудиофайлам
+        mic_path = records_dir / f"{base_name}_mic.wav"
+        sys_path = records_dir / f"{base_name}_sys.wav"
+        
+        mic_path_str = str(mic_path) if mic_path.exists() else None
+        sys_path_str = str(sys_path) if sys_path.exists() else None
+        
+        if not mic_path_str and not sys_path_str:
+            QMessageBox.warning(
+                self, "Ошибка", 
+                f"Аудиофайлы не найдены для записи {base_name}\n\n"
+                "Убедитесь, что запись содержит аудио."
+            )
             return
         
-        self._log(f"📝 Транскрибирую: {os.path.basename(video_path)}...")
+        found_files = []
+        if mic_path_str:
+            found_files.append("Микрофон (Я)")
+        if sys_path_str:
+            found_files.append("Системный звук (Собеседник)")
+        
+        self._log(f"📝 Транскрибирую: {base_name}")
+        self._log(f"   Найдено: {', '.join(found_files)}")
         self.meeting_status.setText("⏳ Транскрибация...")
         
         self._transcribe_worker = MeetingTranscribeWorker(
-            self.meeting_transcriber, video_path
+            self.meeting_transcriber,
+            mic_path=mic_path_str,
+            sys_path=sys_path_str,
+            output_dir=str(records_dir)
         )
         self._transcribe_worker.progress.connect(lambda s: self._log(f"   {s}"))
         self._transcribe_worker.finished.connect(self._on_meeting_transcribed)
