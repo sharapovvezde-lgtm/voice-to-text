@@ -18,8 +18,15 @@ echo.
 pip show imageio-ffmpeg >nul 2>&1
 if errorlevel 1 (
     echo  [!] Устанавливаю зависимости для Meeting Recorder...
-    pip install mss opencv-python Pillow imageio-ffmpeg --quiet
+    pip install mss opencv-python Pillow imageio-ffmpeg pyaudiowpatch --quiet
     echo  [OK] Зависимости установлены
+    echo.
+)
+pip show pyaudiowpatch >nul 2>&1
+if errorlevel 1 (
+    echo  [!] Устанавливаю pyaudiowpatch для записи системного звука...
+    pip install pyaudiowpatch --quiet
+    echo  [OK] pyaudiowpatch установлен
     echo.
 )
 

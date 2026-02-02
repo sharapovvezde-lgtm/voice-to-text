@@ -1,14 +1,13 @@
 """
 Meeting Recorder v2 — Запись экрана со звуком
 - Видео: захват выбранной области экрана
-- Аудио: микрофон + системный звук  
-- Выход: MP4 файл со звуком + отдельные WAV для транскрибации
+- Аудио: микрофон (Я) + системный звук (Собеседник)
+- Выход: MP4 файл + отдельные WAV для транскрибации
 """
 import os
 import sys
 import time
 import threading
-import tempfile
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -169,7 +168,7 @@ class ScreenRegionSelector(QWidget):
 
 
 class MeetingRecorder:
-    """Запись встреч: экран + микрофон (+ системный звук)"""
+    """Запись встреч: экран + микрофон + системный звук"""
     
     def __init__(self, output_dir: str = None):
         self.output_dir = Path(output_dir) if output_dir else Path("./records")
@@ -185,13 +184,18 @@ class MeetingRecorder:
         self.is_recording = False
         self._stop_event = threading.Event()
         
-        # Буферы
+        # Буферы - РАЗДЕЛЬНЫЕ для микрофона и системы!
         self._video_frames = []
-        self._audio_data = []  # Общий буфер аудио
+        self._mic_audio_data = []  # Микрофон (Я)
+        self._sys_audio_data = []  # Системный звук (Собеседник)
         
         # Потоки
         self._video_thread = None
-        self._audio_thread = None
+        self._mic_thread = None
+        self._sys_thread = None
+        
+        # Loopback устройство
+        self._loopback_device = None
     
     def get_monitors(self) -> list:
         with mss.mss() as sct:
@@ -219,23 +223,30 @@ class MeetingRecorder:
         return mics
     
     def get_loopback_device(self):
-        """Проверка наличия системного аудио захвата"""
+        """Найти устройство для захвата системного звука (WASAPI Loopback)"""
         try:
-            import pyaudiowpatch as pa
-            p = pa.PyAudio()
+            import pyaudiowpatch as pyaudio
+            p = pyaudio.PyAudio()
+            
+            # Ищем loopback устройство
             for i in range(p.get_device_count()):
                 dev = p.get_device_info_by_index(i)
                 if dev.get('isLoopbackDevice', False):
+                    print(f"🔊 Найден Loopback: {dev['name']}")
                     p.terminate()
                     return dev
+            
             p.terminate()
-        except:
-            pass
+            print("⚠️ Loopback устройство не найдено")
+        except ImportError:
+            print("⚠️ pyaudiowpatch не установлен - системный звук недоступен")
+        except Exception as e:
+            print(f"⚠️ Ошибка поиска loopback: {e}")
         return None
     
     def _record_video(self):
         """Поток записи видео"""
-        print(f"📹 Видео: старт (область: {self.monitor})")
+        print(f"📹 Видео: старт")
         first_frame = True
         with mss.mss() as sct:
             frame_time = 1.0 / self.fps
@@ -256,9 +267,9 @@ class MeetingRecorder:
                     time.sleep(frame_time - elapsed)
         print(f"📹 Видео: {len(self._video_frames)} кадров")
     
-    def _record_audio(self):
-        """Поток записи аудио (микрофон)"""
-        print(f"🎤 Аудио: старт (устройство {self.mic_device})")
+    def _record_microphone(self):
+        """Поток записи микрофона (Я)"""
+        print(f"🎤 Микрофон: старт (устройство {self.mic_device})")
         
         try:
             chunk_samples = int(self.audio_rate * 0.1)  # 100ms
@@ -275,17 +286,77 @@ class MeetingRecorder:
             while not self._stop_event.is_set():
                 try:
                     data, _ = stream.read(chunk_samples)
-                    self._audio_data.append(data.copy())
+                    self._mic_audio_data.append(data.copy())
                 except Exception as e:
-                    print(f"Audio read err: {e}")
+                    print(f"Mic read err: {e}")
                     time.sleep(0.05)
             
             stream.stop()
             stream.close()
-            print(f"🎤 Аудио: {len(self._audio_data)} чанков")
+            print(f"🎤 Микрофон: {len(self._mic_audio_data)} чанков")
             
         except Exception as e:
-            print(f"❌ Аудио ошибка: {e}")
+            print(f"❌ Микрофон ошибка: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _record_system_audio(self):
+        """Поток записи системного звука (Собеседник) через WASAPI Loopback"""
+        if not self._loopback_device:
+            print("⚠️ Системный звук: пропущен (нет loopback)")
+            return
+        
+        print(f"🔊 Системный звук: старт")
+        
+        try:
+            import pyaudiowpatch as pyaudio
+            p = pyaudio.PyAudio()
+            
+            device_index = self._loopback_device['index']
+            channels = int(self._loopback_device['maxInputChannels'])
+            rate = int(self._loopback_device['defaultSampleRate'])
+            
+            # Открываем поток
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=rate,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=int(rate * 0.1)  # 100ms
+            )
+            
+            while not self._stop_event.is_set():
+                try:
+                    data = stream.read(int(rate * 0.1), exception_on_overflow=False)
+                    # Конвертируем в numpy
+                    audio_data = np.frombuffer(data, dtype=np.int16)
+                    
+                    # Если стерео - конвертируем в моно
+                    if channels > 1:
+                        audio_data = audio_data.reshape(-1, channels)
+                        audio_data = np.mean(audio_data, axis=1).astype(np.int16)
+                    
+                    # Ресемплируем если нужно (до 44100)
+                    if rate != self.audio_rate:
+                        # Простой ресемплинг
+                        ratio = self.audio_rate / rate
+                        new_len = int(len(audio_data) * ratio)
+                        indices = np.linspace(0, len(audio_data) - 1, new_len).astype(int)
+                        audio_data = audio_data[indices]
+                    
+                    self._sys_audio_data.append(audio_data)
+                except Exception as e:
+                    print(f"Sys read err: {e}")
+                    time.sleep(0.05)
+            
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            print(f"🔊 Системный звук: {len(self._sys_audio_data)} чанков")
+            
+        except Exception as e:
+            print(f"❌ Системный звук ошибка: {e}")
             import traceback
             traceback.print_exc()
     
@@ -300,11 +371,18 @@ class MeetingRecorder:
         
         # Очистка
         self._video_frames = []
-        self._audio_data = []
+        self._mic_audio_data = []
+        self._sys_audio_data = []
         self._stop_event.clear()
         
         self.monitor = region
         self.mic_device = mic_device
+        
+        # Находим loopback если нужно
+        if record_system:
+            self._loopback_device = self.get_loopback_device()
+        else:
+            self._loopback_device = None
         
         print(f"▶️ Запись области: left={region['left']}, top={region['top']}, "
               f"width={region['width']}, height={region['height']}")
@@ -313,10 +391,12 @@ class MeetingRecorder:
         
         # Запуск потоков
         self._video_thread = threading.Thread(target=self._record_video, daemon=True)
-        self._audio_thread = threading.Thread(target=self._record_audio, daemon=True)
+        self._mic_thread = threading.Thread(target=self._record_microphone, daemon=True)
+        self._sys_thread = threading.Thread(target=self._record_system_audio, daemon=True)
         
         self._video_thread.start()
-        self._audio_thread.start()
+        self._mic_thread.start()
+        self._sys_thread.start()
         
         return True
     
@@ -331,18 +411,21 @@ class MeetingRecorder:
         
         if self._video_thread:
             self._video_thread.join(timeout=3)
-        if self._audio_thread:
-            self._audio_thread.join(timeout=3)
+        if self._mic_thread:
+            self._mic_thread.join(timeout=3)
+        if self._sys_thread:
+            self._sys_thread.join(timeout=3)
         
         return self._save_recording()
     
     def _save_recording(self) -> dict:
-        """Сохранить видео со звуком"""
+        """Сохранить видео со звуком + отдельные WAV"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"Meeting_{timestamp}"
         
         temp_video = str(self.output_dir / f"{base_name}_temp.avi")
-        temp_audio = str(self.output_dir / f"{base_name}_mic.wav")
+        mic_audio_path = str(self.output_dir / f"{base_name}_mic.wav")
+        sys_audio_path = str(self.output_dir / f"{base_name}_sys.wav")
         final_video = str(self.output_dir / f"{base_name}.mp4")
         
         result = {"video": None, "mic_audio": None, "sys_audio": None, "base_name": base_name}
@@ -361,39 +444,83 @@ class MeetingRecorder:
             print("⚠️ Нет видеокадров!")
             return result
         
-        # 2. Сохраняем аудио
-        if self._audio_data:
-            print(f"💾 Аудио: {len(self._audio_data)} чанков...")
-            audio_array = np.concatenate(self._audio_data)
+        # 2. Сохраняем аудио МИКРОФОНА (Я)
+        if self._mic_audio_data:
+            print(f"💾 Микрофон: {len(self._mic_audio_data)} чанков...")
+            audio_array = np.concatenate(self._mic_audio_data)
             
-            # Сохраняем WAV для транскрибации
-            with wave.open(temp_audio, 'wb') as wf:
+            with wave.open(mic_audio_path, 'wb') as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)  # 16-bit
                 wf.setframerate(self.audio_rate)
                 wf.writeframes(audio_array.tobytes())
             
-            result["mic_audio"] = temp_audio
-            print(f"   ✓ Аудио: {temp_audio}")
+            result["mic_audio"] = mic_audio_path
+            print(f"   ✓ Микрофон: {mic_audio_path}")
         else:
-            print("⚠️ Нет аудио!")
+            print("⚠️ Нет аудио микрофона!")
         
-        # 3. Объединяем видео + аудио через FFmpeg
+        # 3. Сохраняем СИСТЕМНЫЙ звук (Собеседник)
+        if self._sys_audio_data:
+            print(f"💾 Системный звук: {len(self._sys_audio_data)} чанков...")
+            audio_array = np.concatenate(self._sys_audio_data)
+            
+            with wave.open(sys_audio_path, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(self.audio_rate)
+                wf.writeframes(audio_array.tobytes())
+            
+            result["sys_audio"] = sys_audio_path
+            print(f"   ✓ Системный звук: {sys_audio_path}")
+        else:
+            print("⚠️ Нет системного звука (собеседник не слышен)")
+        
+        # 4. Объединяем видео + аудио через FFmpeg
         try:
             print("🎬 Объединяю видео и аудио...")
             
-            # Получаем путь к ffmpeg через imageio
             import imageio_ffmpeg
             ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
             
             import subprocess
             
-            if result["mic_audio"] and os.path.exists(temp_audio):
+            # Определяем какое аудио использовать для видео
+            audio_for_video = None
+            if result["mic_audio"] and result["sys_audio"]:
+                # Есть оба - микшируем
+                mixed_audio = str(self.output_dir / f"{base_name}_mixed.wav")
+                
+                # Загружаем оба аудио
+                mic_arr = np.concatenate(self._mic_audio_data)
+                sys_arr = np.concatenate(self._sys_audio_data)
+                
+                # Выравниваем по длине
+                max_len = max(len(mic_arr), len(sys_arr))
+                mic_arr = np.pad(mic_arr, (0, max_len - len(mic_arr)))
+                sys_arr = np.pad(sys_arr, (0, max_len - len(sys_arr)))
+                
+                # Микшируем (50/50)
+                mixed = ((mic_arr.astype(np.float32) + sys_arr.astype(np.float32)) / 2).astype(np.int16)
+                
+                with wave.open(mixed_audio, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(self.audio_rate)
+                    wf.writeframes(mixed.tobytes())
+                
+                audio_for_video = mixed_audio
+            elif result["mic_audio"]:
+                audio_for_video = result["mic_audio"]
+            elif result["sys_audio"]:
+                audio_for_video = result["sys_audio"]
+            
+            if audio_for_video and os.path.exists(audio_for_video):
                 # FFmpeg: объединить видео + аудио
                 cmd = [
                     ffmpeg_path, '-y',
                     '-i', temp_video,
-                    '-i', temp_audio,
+                    '-i', audio_for_video,
                     '-c:v', 'libx264',
                     '-c:a', 'aac',
                     '-b:a', '192k',
@@ -407,9 +534,12 @@ class MeetingRecorder:
                 if proc.returncode == 0 and os.path.exists(final_video):
                     result["video"] = final_video
                     print(f"   ✅ Видео со звуком: {final_video}")
-                    # Удаляем временный файл
+                    # Удаляем временные файлы
                     if os.path.exists(temp_video):
                         os.remove(temp_video)
+                    if audio_for_video != result["mic_audio"] and audio_for_video != result["sys_audio"]:
+                        if os.path.exists(audio_for_video):
+                            os.remove(audio_for_video)
                 else:
                     print(f"   ⚠️ FFmpeg ошибка: {proc.stderr[:200] if proc.stderr else 'unknown'}")
                     # Оставляем AVI
@@ -429,7 +559,6 @@ class MeetingRecorder:
             print(f"❌ Ошибка: {e}")
             import traceback
             traceback.print_exc()
-            # Fallback - оставляем как есть
             result["video"] = temp_video
         
         return result
