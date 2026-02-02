@@ -7,14 +7,24 @@ color 0E
 echo.
 echo  ╔═══════════════════════════════════════════╗
 echo  ║     [DEV] ТЕСТОВЫЙ РЕЖИМ                  ║
-echo  ║     Whisper Quick-Type                    ║
+echo  ║     Whisper Quick-Type + Meetings         ║
 echo  ╚═══════════════════════════════════════════╝
 echo.
 echo  Консоль остаётся открытой для отладки.
 echo  Все логи будут показаны здесь.
 echo.
 
-python main.py
+:: Проверка зависимостей для Meeting Recorder
+pip show mss >nul 2>&1
+if errorlevel 1 (
+    echo  [!] Устанавливаю зависимости для Meeting Recorder...
+    pip install mss opencv-python Pillow soundcard imageio[ffmpeg] ffmpeg-python pygetwindow -q
+    echo  [OK] Зависимости установлены
+    echo.
+)
+
+:: Запуск DEV версии
+python dev_test\main_dev.py
 
 echo.
 echo  ═══════════════════════════════════════════
