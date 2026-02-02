@@ -341,58 +341,58 @@ class MeetingRecorder:
         else:
             print("⚠️ Нет аудио!")
         
-        # 3. Объединяем видео + аудио через moviepy
+        # 3. Объединяем видео + аудио через FFmpeg
         try:
             print("🎬 Объединяю видео и аудио...")
-            from moviepy.editor import VideoFileClip, AudioFileClip
             
-            video_clip = VideoFileClip(temp_video)
+            # Получаем путь к ffmpeg через imageio
+            import imageio_ffmpeg
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+            
+            import subprocess
             
             if result["mic_audio"] and os.path.exists(temp_audio):
-                audio_clip = AudioFileClip(temp_audio)
+                # FFmpeg: объединить видео + аудио
+                cmd = [
+                    ffmpeg_path, '-y',
+                    '-i', temp_video,
+                    '-i', temp_audio,
+                    '-c:v', 'libx264',
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    '-shortest',
+                    final_video
+                ]
                 
-                # Подгоняем длину аудио под видео
-                if audio_clip.duration > video_clip.duration:
-                    audio_clip = audio_clip.subclip(0, video_clip.duration)
+                print(f"   Выполняю: ffmpeg ...")
+                proc = subprocess.run(cmd, capture_output=True, text=True)
                 
-                video_with_audio = video_clip.set_audio(audio_clip)
-                video_with_audio.write_videofile(
-                    final_video,
-                    codec='libx264',
-                    audio_codec='aac',
-                    verbose=False,
-                    logger=None
-                )
-                audio_clip.close()
+                if proc.returncode == 0 and os.path.exists(final_video):
+                    result["video"] = final_video
+                    print(f"   ✅ Видео со звуком: {final_video}")
+                    # Удаляем временный файл
+                    if os.path.exists(temp_video):
+                        os.remove(temp_video)
+                else:
+                    print(f"   ⚠️ FFmpeg ошибка: {proc.stderr[:200] if proc.stderr else 'unknown'}")
+                    # Оставляем AVI
+                    final_avi = str(self.output_dir / f"{base_name}.avi")
+                    import shutil
+                    shutil.move(temp_video, final_avi)
+                    result["video"] = final_avi
             else:
-                # Без аудио
-                video_clip.write_videofile(
-                    final_video,
-                    codec='libx264',
-                    verbose=False,
-                    logger=None
-                )
-            
-            video_clip.close()
-            result["video"] = final_video
-            print(f"   ✅ Финальное видео: {final_video}")
-            
-            # Удаляем временный файл
-            if os.path.exists(temp_video):
-                os.remove(temp_video)
+                # Без аудио - просто переименовываем
+                final_avi = str(self.output_dir / f"{base_name}.avi")
+                import shutil
+                shutil.move(temp_video, final_avi)
+                result["video"] = final_avi
+                print(f"   ✅ Видео (без звука): {final_avi}")
                 
-        except ImportError:
-            print("⚠️ moviepy не установлен! Видео без звука.")
-            # Просто переименовываем
-            import shutil
-            final_avi = str(self.output_dir / f"{base_name}.avi")
-            shutil.move(temp_video, final_avi)
-            result["video"] = final_avi
-            
         except Exception as e:
-            print(f"❌ Ошибка объединения: {e}")
+            print(f"❌ Ошибка: {e}")
             import traceback
             traceback.print_exc()
+            # Fallback - оставляем как есть
             result["video"] = temp_video
         
         return result

@@ -67,12 +67,53 @@ class MeetingTranscriber:
         
         print(f"🔄 Транскрибирую: {audio_path}")
         
-        result = self.model.transcribe(
-            audio_path,
-            language=language,
-            task="transcribe",
-            verbose=False
-        )
+        # Загружаем аудио сами чтобы не зависеть от ffmpeg
+        try:
+            import wave
+            
+            with wave.open(audio_path, 'rb') as wf:
+                sample_rate = wf.getframerate()
+                n_channels = wf.getnchannels()
+                n_frames = wf.getnframes()
+                audio_bytes = wf.readframes(n_frames)
+            
+            # Конвертируем в numpy array
+            audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+            
+            # Если стерео - конвертируем в моно
+            if n_channels > 1:
+                audio_data = audio_data.reshape(-1, n_channels)
+                audio_data = np.mean(audio_data, axis=1)
+            
+            # Конвертируем в float32 в диапазоне [-1, 1]
+            audio_float = audio_data.astype(np.float32) / 32768.0
+            
+            # Ресемплируем до 16000 Hz если нужно (Whisper требует 16kHz)
+            if sample_rate != 16000:
+                # Простой ресемплинг
+                from scipy import signal
+                num_samples = int(len(audio_float) * 16000 / sample_rate)
+                audio_float = signal.resample(audio_float, num_samples)
+            
+            print(f"   Аудио загружено: {len(audio_float)/16000:.1f} сек")
+            
+            # Транскрибируем
+            result = self.model.transcribe(
+                audio_float,
+                language=language,
+                task="transcribe",
+                verbose=False
+            )
+            
+        except Exception as e:
+            print(f"   ⚠️ Ошибка загрузки аудио: {e}")
+            # Fallback - пробуем напрямую (если ffmpeg есть)
+            result = self.model.transcribe(
+                audio_path,
+                language=language,
+                task="transcribe",
+                verbose=False
+            )
         
         segments = []
         for seg in result.get("segments", []):

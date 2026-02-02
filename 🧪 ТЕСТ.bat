@@ -15,11 +15,10 @@ echo  Все логи будут показаны здесь.
 echo.
 
 :: Проверка зависимостей для Meeting Recorder
-pip show moviepy >nul 2>&1
+pip show imageio-ffmpeg >nul 2>&1
 if errorlevel 1 (
     echo  [!] Устанавливаю зависимости для Meeting Recorder...
-    echo      Это может занять 2-3 минуты...
-    pip install mss opencv-python Pillow moviepy --quiet
+    pip install mss opencv-python Pillow imageio-ffmpeg --quiet
     echo  [OK] Зависимости установлены
     echo.
 )

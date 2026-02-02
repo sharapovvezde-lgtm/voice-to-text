@@ -30,11 +30,8 @@ mss
 opencv-python
 Pillow
 
-# Захват системного звука (WASAPI Loopback)
-pyaudiowpatch
-
-# Объединение видео и аудио
-moviepy
+# FFmpeg для объединения видео и аудио
+imageio-ffmpeg
 
 # Выбор окна для записи
 pygetwindow
