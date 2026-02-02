@@ -1,8 +1,8 @@
 """
 Meeting Recorder v2 — Запись экрана со звуком
-- Видео: захват выбранной области экрана
-- Аудио: микрофон (Я) + системный звук (Собеседник)
-- Выход: MP4 файл + отдельные WAV для транскрибации
+- Видео: захват ТОЧНОЙ выбранной области экрана
+- Аудио: микрофон (Я) + системный звук (Собеседник) 
+- Выход: MP4 со звуком + WAV файлы для транскрибации
 """
 import os
 import sys
@@ -66,11 +66,9 @@ class ScreenRegionSelector(QWidget):
         self.setFocus()
     
     def _global_to_local(self, global_point):
-        """Конвертировать глобальные координаты экрана в локальные координаты виджета"""
         return QPoint(global_point.x() - self._virtual_x, global_point.y() - self._virtual_y)
     
     def _get_selection_rect_local(self):
-        """Получить прямоугольник выделения в локальных координатах для отрисовки"""
         start_local = self._global_to_local(self._start_global)
         end_local = self._global_to_local(self._end_global)
         return QRect(start_local, end_local).normalized()
@@ -83,17 +81,14 @@ class ScreenRegionSelector(QWidget):
         if self._drawing:
             local_rect = self._get_selection_rect_local()
             if local_rect.width() > 5 and local_rect.height() > 5:
-                # Очищаем область выделения (делаем прозрачной)
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
                 painter.fillRect(local_rect, Qt.GlobalColor.transparent)
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
                 
-                # Зелёная рамка
                 pen = QPen(QColor(0, 255, 0), 3)
                 painter.setPen(pen)
                 painter.drawRect(local_rect)
                 
-                # Размер и координаты
                 size_text = f"{local_rect.width()} × {local_rect.height()}  📍({self._start_global.x()}, {self._start_global.y()})"
                 painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
                 painter.setPen(QColor(255, 255, 0))
@@ -102,7 +97,6 @@ class ScreenRegionSelector(QWidget):
                     text_y = local_rect.bottom() + 25
                 painter.drawText(local_rect.x() + 5, text_y, size_text)
         
-        # Инструкция
         painter.setPen(QColor(255, 255, 255))
         painter.setFont(QFont("Arial", 20, QFont.Weight.Bold))
         painter.drawText(self.rect().adjusted(0, 50, 0, 0), 
@@ -115,7 +109,6 @@ class ScreenRegionSelector(QWidget):
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Используем глобальные координаты!
             global_pos = event.globalPosition().toPoint()
             self._start_global = global_pos
             self._end_global = global_pos
@@ -132,7 +125,6 @@ class ScreenRegionSelector(QWidget):
             self._drawing = False
             self._end_global = event.globalPosition().toPoint()
             
-            # Вычисляем прямоугольник в ГЛОБАЛЬНЫХ координатах экрана
             x1 = min(self._start_global.x(), self._end_global.x())
             y1 = min(self._start_global.y(), self._end_global.y())
             x2 = max(self._start_global.x(), self._end_global.x())
@@ -154,7 +146,6 @@ class ScreenRegionSelector(QWidget):
                 if self.callback:
                     self.callback(global_rect)
             else:
-                # Слишком маленькая область
                 self._start_global = QPoint()
                 self._end_global = QPoint()
                 self.update()
@@ -174,27 +165,24 @@ class MeetingRecorder:
         self.output_dir = Path(output_dir) if output_dir else Path("./records")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Настройки
         self.fps = 15
         self.audio_rate = 44100
         self.monitor = None
         self.mic_device = None
         
-        # Состояние
         self.is_recording = False
         self._stop_event = threading.Event()
         
-        # Буферы - РАЗДЕЛЬНЫЕ для микрофона и системы!
+        # Буферы
         self._video_frames = []
-        self._mic_audio_data = []  # Микрофон (Я)
-        self._sys_audio_data = []  # Системный звук (Собеседник)
+        self._mic_audio_data = []
+        self._sys_audio_data = []
         
         # Потоки
         self._video_thread = None
         self._mic_thread = None
         self._sys_thread = None
         
-        # Loopback устройство
         self._loopback_device = None
     
     def get_monitors(self) -> list:
@@ -223,12 +211,11 @@ class MeetingRecorder:
         return mics
     
     def get_loopback_device(self):
-        """Найти устройство для захвата системного звука (WASAPI Loopback)"""
+        """Найти устройство для захвата системного звука"""
         try:
             import pyaudiowpatch as pyaudio
             p = pyaudio.PyAudio()
             
-            # Ищем loopback устройство
             for i in range(p.get_device_count()):
                 dev = p.get_device_info_by_index(i)
                 if dev.get('isLoopbackDevice', False):
@@ -239,40 +226,57 @@ class MeetingRecorder:
             p.terminate()
             print("⚠️ Loopback устройство не найдено")
         except ImportError:
-            print("⚠️ pyaudiowpatch не установлен - системный звук недоступен")
+            print("⚠️ pyaudiowpatch не установлен")
         except Exception as e:
             print(f"⚠️ Ошибка поиска loopback: {e}")
         return None
     
     def _record_video(self):
-        """Поток записи видео"""
+        """Поток записи видео — ТОЧНАЯ область!"""
         print(f"📹 Видео: старт")
+        print(f"   Область: left={self.monitor['left']}, top={self.monitor['top']}, "
+              f"w={self.monitor['width']}, h={self.monitor['height']}")
+        
         first_frame = True
         with mss.mss() as sct:
             frame_time = 1.0 / self.fps
+            
+            # ВАЖНО: Создаём копию словаря для mss
+            grab_region = {
+                "left": int(self.monitor['left']),
+                "top": int(self.monitor['top']),
+                "width": int(self.monitor['width']),
+                "height": int(self.monitor['height'])
+            }
+            
             while not self._stop_event.is_set():
                 start = time.time()
                 try:
-                    img = sct.grab(self.monitor)
+                    # Захватываем ТОЧНО указанную область
+                    img = sct.grab(grab_region)
                     frame = np.array(img)
+                    
                     if first_frame:
                         print(f"   Первый кадр: {frame.shape[1]}x{frame.shape[0]} px")
                         first_frame = False
+                    
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                     self._video_frames.append(frame)
                 except Exception as e:
                     print(f"Video err: {e}")
+                
                 elapsed = time.time() - start
                 if elapsed < frame_time:
                     time.sleep(frame_time - elapsed)
+        
         print(f"📹 Видео: {len(self._video_frames)} кадров")
     
     def _record_microphone(self):
-        """Поток записи микрофона (Я)"""
+        """Поток записи микрофона"""
         print(f"🎤 Микрофон: старт (устройство {self.mic_device})")
         
         try:
-            chunk_samples = int(self.audio_rate * 0.1)  # 100ms
+            chunk_samples = int(self.audio_rate * 0.1)
             
             stream = sd.InputStream(
                 device=self.mic_device,
@@ -286,7 +290,9 @@ class MeetingRecorder:
             while not self._stop_event.is_set():
                 try:
                     data, _ = stream.read(chunk_samples)
-                    self._mic_audio_data.append(data.copy())
+                    # Убеждаемся что данные 1D
+                    flat_data = data.flatten().copy()
+                    self._mic_audio_data.append(flat_data)
                 except Exception as e:
                     print(f"Mic read err: {e}")
                     time.sleep(0.05)
@@ -301,9 +307,9 @@ class MeetingRecorder:
             traceback.print_exc()
     
     def _record_system_audio(self):
-        """Поток записи системного звука (Собеседник) через WASAPI Loopback"""
+        """Поток записи системного звука через WASAPI Loopback"""
         if not self._loopback_device:
-            print("⚠️ Системный звук: пропущен (нет loopback)")
+            print("⚠️ Системный звук: пропущен")
             return
         
         print(f"🔊 Системный звук: старт")
@@ -316,20 +322,18 @@ class MeetingRecorder:
             channels = int(self._loopback_device['maxInputChannels'])
             rate = int(self._loopback_device['defaultSampleRate'])
             
-            # Открываем поток
             stream = p.open(
                 format=pyaudio.paInt16,
                 channels=channels,
                 rate=rate,
                 input=True,
                 input_device_index=device_index,
-                frames_per_buffer=int(rate * 0.1)  # 100ms
+                frames_per_buffer=int(rate * 0.1)
             )
             
             while not self._stop_event.is_set():
                 try:
                     data = stream.read(int(rate * 0.1), exception_on_overflow=False)
-                    # Конвертируем в numpy
                     audio_data = np.frombuffer(data, dtype=np.int16)
                     
                     # Если стерео - конвертируем в моно
@@ -337,15 +341,15 @@ class MeetingRecorder:
                         audio_data = audio_data.reshape(-1, channels)
                         audio_data = np.mean(audio_data, axis=1).astype(np.int16)
                     
-                    # Ресемплируем если нужно (до 44100)
+                    # Ресемплируем если нужно
                     if rate != self.audio_rate:
-                        # Простой ресемплинг
                         ratio = self.audio_rate / rate
                         new_len = int(len(audio_data) * ratio)
                         indices = np.linspace(0, len(audio_data) - 1, new_len).astype(int)
                         audio_data = audio_data[indices]
                     
-                    self._sys_audio_data.append(audio_data)
+                    # Убеждаемся что данные 1D
+                    self._sys_audio_data.append(audio_data.flatten().copy())
                 except Exception as e:
                     print(f"Sys read err: {e}")
                     time.sleep(0.05)
@@ -375,17 +379,22 @@ class MeetingRecorder:
         self._sys_audio_data = []
         self._stop_event.clear()
         
-        self.monitor = region
+        # ВАЖНО: Сохраняем копию региона с int значениями
+        self.monitor = {
+            "left": int(region['left']),
+            "top": int(region['top']),
+            "width": int(region['width']),
+            "height": int(region['height'])
+        }
         self.mic_device = mic_device
         
-        # Находим loopback если нужно
         if record_system:
             self._loopback_device = self.get_loopback_device()
         else:
             self._loopback_device = None
         
-        print(f"▶️ Запись области: left={region['left']}, top={region['top']}, "
-              f"width={region['width']}, height={region['height']}")
+        print(f"▶️ Запись области: left={self.monitor['left']}, top={self.monitor['top']}, "
+              f"width={self.monitor['width']}, height={self.monitor['height']}")
         
         self.is_recording = True
         
@@ -419,7 +428,7 @@ class MeetingRecorder:
         return self._save_recording()
     
     def _save_recording(self) -> dict:
-        """Сохранить видео со звуком + отдельные WAV"""
+        """Сохранить видео со звуком"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"Meeting_{timestamp}"
         
@@ -444,14 +453,15 @@ class MeetingRecorder:
             print("⚠️ Нет видеокадров!")
             return result
         
-        # 2. Сохраняем аудио МИКРОФОНА (Я)
+        # 2. Сохраняем аудио МИКРОФОНА
         if self._mic_audio_data:
             print(f"💾 Микрофон: {len(self._mic_audio_data)} чанков...")
-            audio_array = np.concatenate(self._mic_audio_data)
+            # Объединяем все чанки в один массив
+            audio_array = np.concatenate([chunk.flatten() for chunk in self._mic_audio_data])
             
             with wave.open(mic_audio_path, 'wb') as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
+                wf.setsampwidth(2)
                 wf.setframerate(self.audio_rate)
                 wf.writeframes(audio_array.tobytes())
             
@@ -460,21 +470,21 @@ class MeetingRecorder:
         else:
             print("⚠️ Нет аудио микрофона!")
         
-        # 3. Сохраняем СИСТЕМНЫЙ звук (Собеседник)
+        # 3. Сохраняем СИСТЕМНЫЙ звук
         if self._sys_audio_data:
             print(f"💾 Системный звук: {len(self._sys_audio_data)} чанков...")
-            audio_array = np.concatenate(self._sys_audio_data)
+            audio_array = np.concatenate([chunk.flatten() for chunk in self._sys_audio_data])
             
             with wave.open(sys_audio_path, 'wb') as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
+                wf.setsampwidth(2)
                 wf.setframerate(self.audio_rate)
                 wf.writeframes(audio_array.tobytes())
             
             result["sys_audio"] = sys_audio_path
             print(f"   ✓ Системный звук: {sys_audio_path}")
         else:
-            print("⚠️ Нет системного звука (собеседник не слышен)")
+            print("⚠️ Нет системного звука")
         
         # 4. Объединяем видео + аудио через FFmpeg
         try:
@@ -482,38 +492,34 @@ class MeetingRecorder:
             
             import imageio_ffmpeg
             ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-            
             import subprocess
             
-            # Определяем какое аудио использовать для видео
-            audio_for_video = None
-            if result["mic_audio"] and result["sys_audio"]:
-                # Есть оба - микшируем
+            # Используем МИКРОФОН для аудио в видео (простое решение)
+            audio_for_video = result.get("mic_audio")
+            
+            # Если есть и микрофон и системный звук - микшируем через FFmpeg
+            if result.get("mic_audio") and result.get("sys_audio"):
+                print("   Микширую аудио через FFmpeg...")
                 mixed_audio = str(self.output_dir / f"{base_name}_mixed.wav")
                 
-                # Загружаем оба аудио
-                mic_arr = np.concatenate(self._mic_audio_data)
-                sys_arr = np.concatenate(self._sys_audio_data)
+                # FFmpeg микширование
+                mix_cmd = [
+                    ffmpeg_path, '-y',
+                    '-i', mic_audio_path,
+                    '-i', sys_audio_path,
+                    '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=longest[aout]',
+                    '-map', '[aout]',
+                    '-ac', '1',
+                    '-ar', str(self.audio_rate),
+                    mixed_audio
+                ]
                 
-                # Выравниваем по длине
-                max_len = max(len(mic_arr), len(sys_arr))
-                mic_arr = np.pad(mic_arr, (0, max_len - len(mic_arr)))
-                sys_arr = np.pad(sys_arr, (0, max_len - len(sys_arr)))
-                
-                # Микшируем (50/50)
-                mixed = ((mic_arr.astype(np.float32) + sys_arr.astype(np.float32)) / 2).astype(np.int16)
-                
-                with wave.open(mixed_audio, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(self.audio_rate)
-                    wf.writeframes(mixed.tobytes())
-                
-                audio_for_video = mixed_audio
-            elif result["mic_audio"]:
-                audio_for_video = result["mic_audio"]
-            elif result["sys_audio"]:
-                audio_for_video = result["sys_audio"]
+                mix_proc = subprocess.run(mix_cmd, capture_output=True, text=True)
+                if mix_proc.returncode == 0 and os.path.exists(mixed_audio):
+                    audio_for_video = mixed_audio
+                    print(f"   ✓ Микшированное аудио создано")
+                else:
+                    print(f"   ⚠️ Микширование не удалось, использую микрофон")
             
             if audio_for_video and os.path.exists(audio_for_video):
                 # FFmpeg: объединить видео + аудио
@@ -528,7 +534,7 @@ class MeetingRecorder:
                     final_video
                 ]
                 
-                print(f"   Выполняю: ffmpeg ...")
+                print(f"   Создаю финальное видео...")
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 
                 if proc.returncode == 0 and os.path.exists(final_video):
@@ -537,18 +543,17 @@ class MeetingRecorder:
                     # Удаляем временные файлы
                     if os.path.exists(temp_video):
                         os.remove(temp_video)
-                    if audio_for_video != result["mic_audio"] and audio_for_video != result["sys_audio"]:
-                        if os.path.exists(audio_for_video):
-                            os.remove(audio_for_video)
+                    # Удаляем mixed если создавали
+                    mixed_path = str(self.output_dir / f"{base_name}_mixed.wav")
+                    if os.path.exists(mixed_path):
+                        os.remove(mixed_path)
                 else:
-                    print(f"   ⚠️ FFmpeg ошибка: {proc.stderr[:200] if proc.stderr else 'unknown'}")
-                    # Оставляем AVI
+                    print(f"   ⚠️ FFmpeg ошибка: {proc.stderr[:300] if proc.stderr else 'unknown'}")
                     final_avi = str(self.output_dir / f"{base_name}.avi")
                     import shutil
                     shutil.move(temp_video, final_avi)
                     result["video"] = final_avi
             else:
-                # Без аудио - просто переименовываем
                 final_avi = str(self.output_dir / f"{base_name}.avi")
                 import shutil
                 shutil.move(temp_video, final_avi)
