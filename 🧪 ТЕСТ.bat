@@ -15,12 +15,17 @@ echo  Все логи будут показаны здесь.
 echo.
 
 :: Проверка зависимостей для Meeting Recorder
-pip show mss >nul 2>&1
+pip show pyaudiowpatch >nul 2>&1
 if errorlevel 1 (
     echo  [!] Устанавливаю зависимости для Meeting Recorder...
-    pip install mss opencv-python Pillow pyaudiowpatch pygetwindow -q
+    pip install mss opencv-python Pillow pyaudiowpatch pygetwindow --quiet
     echo  [OK] Зависимости установлены
     echo.
+) else (
+    pip show mss >nul 2>&1
+    if errorlevel 1 (
+        pip install mss opencv-python Pillow pygetwindow --quiet
+    )
 )
 
 :: Запуск DEV версии

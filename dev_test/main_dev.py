@@ -409,15 +409,49 @@ class MainWindow(QMainWindow):
         self.sys_audio_cb.setStyleSheet("font-weight: bold;")
         sys_row.addWidget(self.sys_audio_cb)
         
-        # Статус loopback
-        loopback = self.meeting_recorder.get_loopback_device()
-        if loopback:
-            self.loopback_label = QLabel("✅ Найден")
-            self.loopback_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
-        else:
-            self.loopback_label = QLabel("❌ Не найден")
+        # Статус loopback - проверяем наличие pyaudiowpatch
+        try:
+            import pyaudiowpatch as pa
+            p = pa.PyAudio()
+            loopback_found = False
+            loopback_name = ""
+            
+            for i in range(p.get_device_count()):
+                try:
+                    dev = p.get_device_info_by_index(i)
+                    if dev.get('isLoopbackDevice', False):
+                        loopback_found = True
+                        loopback_name = dev['name'][:20]
+                        break
+                except:
+                    continue
+            
+            if not loopback_found:
+                # Попробуем default output
+                try:
+                    wasapi = p.get_host_api_info_by_type(pa.paWASAPI)
+                    if wasapi.get('defaultOutputDevice', -1) >= 0:
+                        loopback_found = True
+                        loopback_name = "Default Output"
+                except:
+                    pass
+            
+            p.terminate()
+            
+            if loopback_found:
+                self.loopback_label = QLabel(f"✅ {loopback_name}")
+                self.loopback_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            else:
+                self.loopback_label = QLabel("⚠️ Нужен pyaudiowpatch")
+                self.loopback_label.setStyleSheet("color: #FF9800;")
+        except ImportError:
+            self.loopback_label = QLabel("❌ pyaudiowpatch не установлен")
             self.loopback_label.setStyleSheet("color: #c62828;")
             self.sys_audio_cb.setEnabled(False)
+        except Exception as e:
+            self.loopback_label = QLabel(f"⚠️ {str(e)[:20]}")
+            self.loopback_label.setStyleSheet("color: #FF9800;")
+        
         sys_row.addWidget(self.loopback_label)
         sys_row.addStretch()
         audio_layout.addLayout(sys_row)

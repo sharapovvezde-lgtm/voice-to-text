@@ -245,39 +245,60 @@ class MeetingRecorder:
     def get_loopback_device(self):
         """Найти устройство WASAPI Loopback для захвата системного звука"""
         if not PYAUDIO_AVAILABLE:
+            print("⚠️ PyAudio не установлен")
             return None
         
         try:
             p = pyaudio.PyAudio()
             
-            # Ищем WASAPI loopback устройство
-            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            
-            # Ищем loopback устройство (обычно содержит "loopback" в названии)
+            # Способ 1: Ищем устройство с isLoopbackDevice (pyaudiowpatch)
             for i in range(p.get_device_count()):
-                dev = p.get_device_info_by_index(i)
-                
-                # Проверяем что это WASAPI и loopback
-                if dev.get('hostApi') == wasapi_info['index']:
-                    # Ищем устройство с isLoopbackDevice или с "loopback" в имени
-                    if dev.get('isLoopbackDevice', False) or 'loopback' in dev['name'].lower():
+                try:
+                    dev = p.get_device_info_by_index(i)
+                    if dev.get('isLoopbackDevice', False):
+                        print(f"🔊 Найден loopback: {dev['name']}")
                         self._loopback_device = dev
                         p.terminate()
                         return dev
-                    
-                    # Или это устройство вывода по умолчанию
-                    if dev['maxInputChannels'] > 0 and dev['maxOutputChannels'] == 0:
-                        # Может быть loopback
-                        pass
+                except:
+                    continue
             
-            # Если не нашли явный loopback, берём default output device
-            default_output = p.get_default_output_device_info()
-            self._loopback_device = default_output
+            # Способ 2: Ищем WASAPI default speakers и делаем из него loopback
+            try:
+                wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                default_speakers_idx = wasapi_info.get('defaultOutputDevice', -1)
+                
+                if default_speakers_idx >= 0:
+                    speakers = p.get_device_info_by_index(default_speakers_idx)
+                    print(f"🔊 Default speakers: {speakers['name']}")
+                    
+                    # Для pyaudiowpatch - ищем loopback версию
+                    for i in range(p.get_device_count()):
+                        dev = p.get_device_info_by_index(i)
+                        # Ищем loopback устройство связанное с динамиками
+                        if (dev.get('isLoopbackDevice', False) or 
+                            ('loopback' in dev['name'].lower() and 
+                             speakers['name'].split()[0] in dev['name'])):
+                            print(f"🔊 Loopback для speakers: {dev['name']}")
+                            self._loopback_device = dev
+                            p.terminate()
+                            return dev
+                    
+                    # Если не нашли loopback, используем speakers напрямую
+                    # (работает только с pyaudiowpatch)
+                    self._loopback_device = speakers
+                    p.terminate()
+                    return speakers
+            except Exception as e:
+                print(f"⚠️ WASAPI: {e}")
+            
             p.terminate()
-            return default_output
+            return None
             
         except Exception as e:
             print(f"⚠️ Ошибка поиска loopback: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def set_monitor(self, monitor_id: int = 1):
@@ -309,70 +330,116 @@ class MeetingRecorder:
                     time.sleep(frame_time - elapsed)
     
     def _record_microphone(self):
-        """Поток записи микрофона"""
-        chunk_samples = int(self.mic_samplerate * 0.1)
-        
-        def callback(indata, frames, time_info, status):
-            if status:
-                print(f"Mic: {status}")
-            self._mic_audio.append(indata.copy())
-        
+        """Поток записи микрофона через sounddevice"""
         try:
-            with sd.InputStream(
+            print(f"🎤 Запись микрофона: устройство {self.mic_device}, {self.mic_samplerate}Hz")
+            
+            # Записываем блоками пока не остановят
+            chunk_duration = 0.1  # 100ms
+            chunk_samples = int(self.mic_samplerate * chunk_duration)
+            
+            stream = sd.InputStream(
                 device=self.mic_device,
                 samplerate=self.mic_samplerate,
                 channels=1,
                 dtype='float32',
-                blocksize=chunk_samples,
-                callback=callback
-            ):
-                while not self._stop_event.is_set():
-                    time.sleep(0.05)
+                blocksize=chunk_samples
+            )
+            stream.start()
+            
+            while not self._stop_event.is_set():
+                try:
+                    data, overflowed = stream.read(chunk_samples)
+                    if overflowed:
+                        print("⚠️ Mic overflow")
+                    self._mic_audio.append(data.copy())
+                except Exception as e:
+                    print(f"Mic read: {e}")
+                    time.sleep(0.1)
+            
+            stream.stop()
+            stream.close()
+            print(f"🎤 Микрофон: записано {len(self._mic_audio)} чанков")
+            
         except Exception as e:
             print(f"❌ Ошибка записи микрофона: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _record_system_audio(self):
-        """Поток записи системного звука через PyAudio WASAPI"""
+        """Поток записи системного звука через PyAudio WASAPI Loopback"""
         if not PYAUDIO_AVAILABLE:
-            print("⚠️ PyAudio недоступен")
+            print("⚠️ PyAudio недоступен для системного звука")
             return
         
         try:
             p = pyaudio.PyAudio()
             
-            # Получаем WASAPI host API
-            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            default_speakers = p.get_device_info_by_index(wasapi_info['defaultOutputDevice'])
+            # Ищем loopback устройство
+            loopback_dev = None
             
-            # Проверяем поддержку loopback
-            if not default_speakers.get('isLoopbackDevice', False):
-                # Ищем loopback версию этого устройства
-                for i in range(p.get_device_count()):
+            # Метод 1: Ищем устройство с isLoopbackDevice
+            for i in range(p.get_device_count()):
+                try:
                     dev = p.get_device_info_by_index(i)
-                    if dev.get('name', '').startswith(default_speakers['name'].split(' (')[0]):
-                        if dev.get('isLoopbackDevice', False):
-                            default_speakers = dev
-                            break
+                    if dev.get('isLoopbackDevice', False):
+                        loopback_dev = dev
+                        print(f"🔊 Найден loopback: {dev['name']}")
+                        break
+                except:
+                    continue
             
-            channels = int(default_speakers['maxInputChannels'])
-            if channels < 1:
-                channels = 2
+            # Метод 2: Используем default output с loopback=True (pyaudiowpatch)
+            if loopback_dev is None:
+                try:
+                    wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                    default_idx = wasapi_info.get('defaultOutputDevice', -1)
+                    if default_idx >= 0:
+                        loopback_dev = p.get_device_info_by_index(default_idx)
+                        print(f"🔊 Используем default output: {loopback_dev['name']}")
+                except Exception as e:
+                    print(f"⚠️ Не удалось получить default output: {e}")
             
-            rate = int(default_speakers['defaultSampleRate'])
+            if loopback_dev is None:
+                print("❌ Loopback устройство не найдено")
+                p.terminate()
+                return
+            
+            # Настройки записи
+            channels = max(1, int(loopback_dev.get('maxInputChannels', 2)))
+            if channels == 0:
+                channels = 2  # Для loopback обычно стерео
+            
+            rate = int(loopback_dev.get('defaultSampleRate', 44100))
             self.sys_samplerate = rate
-            
             chunk = int(rate * 0.1)  # 100ms
             
-            stream = p.open(
-                format=pyaudio.paFloat32,
-                channels=channels,
-                rate=rate,
-                input=True,
-                input_device_index=default_speakers['index'],
-                frames_per_buffer=chunk
-            )
+            print(f"🔊 Системный звук: {channels}ch, {rate}Hz")
             
-            print(f"🔊 Системный звук: {default_speakers['name']}")
+            # Открываем поток
+            # Для pyaudiowpatch используем специальные параметры
+            try:
+                stream = p.open(
+                    format=pyaudio.paFloat32,
+                    channels=channels,
+                    rate=rate,
+                    input=True,
+                    input_device_index=loopback_dev['index'],
+                    frames_per_buffer=chunk,
+                    as_loopback=True  # Специальный параметр pyaudiowpatch!
+                )
+            except TypeError:
+                # Если as_loopback не поддерживается (старый pyaudio)
+                stream = p.open(
+                    format=pyaudio.paFloat32,
+                    channels=channels,
+                    rate=rate,
+                    input=True,
+                    input_device_index=loopback_dev['index'],
+                    frames_per_buffer=chunk
+                )
+            
+            print(f"🔊 Поток открыт, записываю...")
             
             while not self._stop_event.is_set():
                 try:
@@ -381,17 +448,23 @@ class MeetingRecorder:
                     
                     # Stereo -> Mono
                     if channels > 1:
-                        audio_data = audio_data.reshape(-1, channels)
-                        audio_data = np.mean(audio_data, axis=1)
+                        try:
+                            audio_data = audio_data.reshape(-1, channels)
+                            audio_data = np.mean(audio_data, axis=1)
+                        except:
+                            pass
                     
-                    self._sys_audio.append(audio_data)
+                    self._sys_audio.append(audio_data.astype(np.float32))
                 except Exception as e:
-                    print(f"Sys audio read error: {e}")
-                    time.sleep(0.1)
+                    if not self._stop_event.is_set():
+                        print(f"⚠️ Sys read: {e}")
+                    time.sleep(0.05)
             
             stream.stop_stream()
             stream.close()
             p.terminate()
+            
+            print(f"🔊 Системный звук: записано {len(self._sys_audio)} чанков")
             
         except Exception as e:
             print(f"❌ Ошибка записи системного звука: {e}")
