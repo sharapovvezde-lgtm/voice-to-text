@@ -33,9 +33,9 @@ except ImportError:
 
 
 # ===== Виджет выбора области экрана =====
-from PyQt6.QtWidgets import QWidget, QApplication, QRubberBand, QLabel
-from PyQt6.QtCore import Qt, QRect, QPoint, QTimer
-from PyQt6.QtGui import QPainter, QColor, QFont
+from PyQt6.QtWidgets import QWidget, QApplication
+from PyQt6.QtCore import Qt, QRect, QPoint
+from PyQt6.QtGui import QPainter, QColor, QFont, QPen
 
 
 class ScreenRegionSelector(QWidget):
@@ -49,54 +49,86 @@ class ScreenRegionSelector(QWidget):
         self.selection = None
         self.origin = QPoint()
         self.current_rect = QRect()
+        self._drawing = False
         
-        # Полноэкранный оверлей
+        # Флаги окна - важно для правильного отображения поверх всего
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
+            Qt.WindowType.BypassWindowManagerHint
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setCursor(Qt.CursorShape.CrossCursor)
         
-        # Получаем размер всех мониторов
-        screen = QApplication.primaryScreen()
-        geometry = screen.virtualGeometry()
-        self.setGeometry(geometry)
+        # Размер на все мониторы
+        self._setup_geometry()
+    
+    def _setup_geometry(self):
+        """Установить размер на весь виртуальный экран (все мониторы)"""
+        screens = QApplication.screens()
+        if not screens:
+            return
         
-        self._drawing = False
+        # Находим общий прямоугольник всех мониторов
+        min_x = min(s.geometry().x() for s in screens)
+        min_y = min(s.geometry().y() for s in screens)
+        max_x = max(s.geometry().x() + s.geometry().width() for s in screens)
+        max_y = max(s.geometry().y() + s.geometry().height() for s in screens)
+        
+        self._screen_offset_x = min_x
+        self._screen_offset_y = min_y
+        
+        self.setGeometry(min_x, min_y, max_x - min_x, max_y - min_y)
+    
+    def showFullScreen(self):
+        """Показать на весь экран"""
+        self._setup_geometry()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
     
     def paintEvent(self, event):
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         # Полупрозрачный тёмный фон
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 120))
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
         
-        # Если выделяем область - рисуем её
-        if self._drawing and not self.current_rect.isNull():
-            # Очищаем выделенную область (делаем её прозрачной)
+        # Если выделяем область
+        if self._drawing and not self.current_rect.isNull() and self.current_rect.width() > 5:
+            # Очищаем выделенную область
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             painter.fillRect(self.current_rect, Qt.GlobalColor.transparent)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             
-            # Рамка вокруг выделения
-            painter.setPen(QColor(0, 200, 0, 255))
+            # Зелёная рамка
+            pen = QPen(QColor(0, 255, 0), 3)
+            painter.setPen(pen)
             painter.drawRect(self.current_rect)
             
-            # Размер области
-            size_text = f"{self.current_rect.width()} x {self.current_rect.height()}"
-            painter.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-            painter.setPen(QColor(255, 255, 255))
-            text_x = self.current_rect.x() + 5
-            text_y = self.current_rect.y() - 10 if self.current_rect.y() > 30 else self.current_rect.bottom() + 20
-            painter.drawText(text_x, text_y, size_text)
+            # Размер
+            size_text = f"{self.current_rect.width()} × {self.current_rect.height()}"
+            painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+            painter.setPen(QColor(255, 255, 0))
+            
+            text_y = self.current_rect.y() - 10
+            if text_y < 25:
+                text_y = self.current_rect.bottom() + 25
+            painter.drawText(self.current_rect.x() + 5, text_y, size_text)
         
-        # Инструкция вверху
+        # Инструкция
         painter.setPen(QColor(255, 255, 255))
-        painter.setFont(QFont("Arial", 16))
-        instruction = "🎯 Зажмите ЛКМ и выделите область для записи  |  ESC = отмена"
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter, 
-                        f"\n\n{instruction}")
+        painter.setFont(QFont("Arial", 20, QFont.Weight.Bold))
+        text = "🎯 ЗАЖМИТЕ левую кнопку мыши и выделите область"
+        painter.drawText(self.rect().adjusted(0, 50, 0, 0), 
+                        Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter, text)
+        
+        painter.setFont(QFont("Arial", 14))
+        painter.drawText(self.rect().adjusted(0, 90, 0, 0),
+                        Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+                        "Нажмите ESC для отмены")
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -115,30 +147,31 @@ class ScreenRegionSelector(QWidget):
             self._drawing = False
             rect = QRect(self.origin, event.pos()).normalized()
             
-            # Минимальный размер 100x100
-            if rect.width() >= 100 and rect.height() >= 100:
+            # Минимальный размер 50x50
+            if rect.width() >= 50 and rect.height() >= 50:
+                # Глобальные координаты с учётом смещения мониторов
                 global_rect = {
-                    "left": self.geometry().x() + rect.x(),
-                    "top": self.geometry().y() + rect.y(),
+                    "left": self._screen_offset_x + rect.x(),
+                    "top": self._screen_offset_y + rect.y(),
                     "width": rect.width(),
                     "height": rect.height()
                 }
                 self.selection = global_rect
+                self.hide()
                 
                 if self.callback:
                     self.callback(global_rect)
             else:
-                if self.callback:
-                    self.callback(None)
-            
-            self.close()
+                # Слишком маленькая область - показываем подсказку и продолжаем
+                self.current_rect = QRect()
+                self.update()
     
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.selection = None
+            self.hide()
             if self.callback:
                 self.callback(None)
-            self.close()
 
 
 class MeetingRecorder:

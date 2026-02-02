@@ -190,6 +190,7 @@ class MainWindow(QMainWindow):
         self._meeting_recording = False
         self._last_recording = None
         self._selected_region = None  # ОБЯЗАТЕЛЬНО для записи!
+        self._region_selector = None  # Селектор области экрана
         
         self._init_ui()
         self._init_tray()
@@ -751,34 +752,39 @@ class MainWindow(QMainWindow):
     
     def _select_screen_region(self):
         """Выбор области экрана — ОБЯЗАТЕЛЬНО перед записью"""
-        self._log("🎯 Выберите область...")
+        self._log("🎯 Выберите область мышкой...")
+        
+        # Скрываем главное окно
         self.hide()
         QApplication.processEvents()
-        time.sleep(0.2)
+        time.sleep(0.3)
         
-        def on_selected(region):
-            self._selected_region = region
-            self.show()
-            
-            if region:
-                self.region_label.setText(
-                    f"✅ Область: {region['width']} x {region['height']} px"
-                )
-                self.region_label.setStyleSheet("""
-                    QLabel { color: #2E7D32; font-weight: bold; padding: 10px;
-                            background: #E8F5E9; border-radius: 5px; }
-                """)
-                self._log(f"✅ Область: {region['width']}x{region['height']}")
-            else:
-                self.region_label.setText("⚠️ Область НЕ выбрана — запись невозможна")
-                self.region_label.setStyleSheet("""
-                    QLabel { color: #c62828; font-weight: bold; padding: 10px;
-                            background: #ffebee; border-radius: 5px; }
-                """)
-                self._log("❌ Выбор отменён")
+        # Создаём селектор и СОХРАНЯЕМ ссылку чтобы не удалился!
+        self._region_selector = ScreenRegionSelector(callback=self._on_region_selected)
+        self._region_selector.showFullScreen()
+    
+    def _on_region_selected(self, region):
+        """Колбэк после выбора области"""
+        self._selected_region = region
+        self.show()
+        self.activateWindow()
         
-        selector = ScreenRegionSelector(callback=on_selected)
-        selector.show()
+        if region:
+            self.region_label.setText(
+                f"✅ Область: {region['width']} x {region['height']} px"
+            )
+            self.region_label.setStyleSheet("""
+                QLabel { color: #2E7D32; font-weight: bold; padding: 10px;
+                        background: #E8F5E9; border-radius: 5px; }
+            """)
+            self._log(f"✅ Область: {region['width']}x{region['height']}")
+        else:
+            self.region_label.setText("⚠️ Область НЕ выбрана — запись невозможна")
+            self.region_label.setStyleSheet("""
+                QLabel { color: #c62828; font-weight: bold; padding: 10px;
+                        background: #ffebee; border-radius: 5px; }
+            """)
+            self._log("❌ Выбор отменён")
     
     def _start_meeting_recording(self):
         if self._meeting_recording or self._recording:
