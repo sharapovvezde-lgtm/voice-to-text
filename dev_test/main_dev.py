@@ -409,22 +409,10 @@ class MainWindow(QMainWindow):
         mic_row.addWidget(self.meeting_mic_combo, 1)
         audio_layout.addLayout(mic_row)
         
-        # Системный звук (Собеседник)
-        sys_row = QHBoxLayout()
-        sys_row.addWidget(QLabel("🔊 Собеседник:"))
-        
-        self.sys_audio_cb = QCheckBox("Записывать системный звук")
-        self.sys_audio_cb.setChecked(True)
-        self.sys_audio_cb.setStyleSheet("QCheckBox { font-weight: bold; }")
-        sys_row.addWidget(self.sys_audio_cb)
-        audio_layout.addLayout(sys_row)
-        
-        # Статус loopback
-        self.loopback_status = QLabel("")
-        self.loopback_status.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
-        audio_layout.addWidget(self.loopback_status)
-        # Отложенная проверка loopback чтобы не крашить при старте
-        QTimer.singleShot(500, self._check_loopback)
+        # Информация
+        info_label = QLabel("💡 Записывается звук с микрофона")
+        info_label.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
+        audio_layout.addWidget(info_label)
         
         layout.addWidget(audio_group)
         
@@ -658,17 +646,6 @@ class MainWindow(QMainWindow):
             default = " ✓" if mic['is_default'] else ""
             self.meeting_mic_combo.addItem(f"{mic['name']}{default}", mic['id'])
     
-    def _check_loopback(self):
-        """Проверить доступность системного звука"""
-        loopback = self.meeting_recorder.get_loopback_device()
-        if loopback:
-            self.loopback_status.setText(f"✅ Loopback найден: {loopback['name'][:40]}...")
-            self.loopback_status.setStyleSheet("color: #2E7D32; font-style: italic; padding: 5px;")
-        else:
-            self.loopback_status.setText("⚠️ Системный звук недоступен (pyaudiowpatch не установлен)")
-            self.loopback_status.setStyleSheet("color: #c62828; font-style: italic; padding: 5px;")
-            self.sys_audio_cb.setChecked(False)
-            self.sys_audio_cb.setEnabled(False)
     
     def _load_settings(self):
         m = self.settings.get('model', 'base')
@@ -888,15 +865,13 @@ class MainWindow(QMainWindow):
             return
         
         mic_id = self.meeting_mic_combo.currentData()
-        record_sys = self.sys_audio_cb.isChecked()
         
         self._log(f"📹 Запись: {self._selected_region['width']}x{self._selected_region['height']}")
-        self._log(f"🎤 Микрофон: {mic_id}, 🔊 Системный: {'да' if record_sys else 'нет'}")
+        self._log(f"   Координаты: x={self._selected_region['left']}, y={self._selected_region['top']}")
         
         success = self.meeting_recorder.start(
             region=self._selected_region,
-            mic_device=mic_id,
-            record_system=record_sys
+            mic_device=mic_id
         )
         
         if success:
@@ -947,9 +922,7 @@ class MainWindow(QMainWindow):
             if result.get("video"):
                 self._log(f"✅ Видео сохранено")
             if result.get("mic_audio"):
-                self._log(f"✅ Микрофон (Я) сохранён")
-            if result.get("sys_audio"):
-                self._log(f"✅ Системный звук (Собеседник) сохранён")
+                self._log(f"✅ Аудио сохранено")
             if result.get("mic_audio"):
                 self._log(f"✅ Аудио сохранено")
             self._refresh_recordings()
@@ -975,13 +948,8 @@ class MainWindow(QMainWindow):
             for f in files[:10]:
                 base_name = f.stem
                 mic_exists = (records_dir / f"{base_name}_mic.wav").exists()
-                sys_exists = (records_dir / f"{base_name}_sys.wav").exists()
                 
-                icons = ""
-                if mic_exists:
-                    icons += " 🎤"
-                if sys_exists:
-                    icons += " 🔊"
+                icons = " 🎤" if mic_exists else ""
                 
                 item = QListWidgetItem(f"📹 {f.name}{icons}")
                 item.setData(Qt.ItemDataRole.UserRole, base_name)

@@ -33,8 +33,5 @@ Pillow
 # FFmpeg для объединения видео и аудио
 imageio-ffmpeg
 
-# Захват системного звука (WASAPI Loopback)
-pyaudiowpatch
-
 # Выбор окна для записи
 pygetwindow
