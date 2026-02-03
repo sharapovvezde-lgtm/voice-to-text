@@ -1,32 +1,39 @@
 @echo off
-chcp 65001 >nul
+chcp 65001 >nul 2>&1
 cd /d "%~dp0"
-title [DEV] Whisper Quick-Type - ТЕСТОВЫЙ РЕЖИМ
-color 0E
 
 echo.
-echo  ╔═══════════════════════════════════════════╗
-echo  ║     [DEV] ТЕСТОВЫЙ РЕЖИМ                  ║
-echo  ║     Whisper Quick-Type + Meetings         ║
-echo  ╚═══════════════════════════════════════════╝
-echo.
-echo  Консоль остаётся открытой для отладки.
-echo  Все логи будут показаны здесь.
+echo  ========================================
+echo   [DEV] TEST MODE
+echo   Whisper Quick-Type + Meetings
+echo  ========================================
 echo.
 
-:: Проверка зависимостей для Meeting Recorder
+:: Check Python
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo  [ERROR] Python not found!
+    pause
+    exit /b 1
+)
+
+:: Check dependencies
 pip show imageio-ffmpeg >nul 2>&1
 if errorlevel 1 (
-    echo  [!] Устанавливаю зависимости для Meeting Recorder...
+    echo  [!] Installing dependencies...
     pip install mss opencv-python Pillow imageio-ffmpeg --quiet
-    echo  [OK] Зависимости установлены
+    echo  [OK] Dependencies installed
     echo.
 )
 
-:: Запуск DEV версии
+echo  Console stays open for debug.
+echo  All logs will be shown here.
+echo.
+
+:: Run DEV version
 python dev_test\main_dev.py
 
 echo.
-echo  ═══════════════════════════════════════════
-echo  Приложение закрыто. Нажмите любую клавишу.
+echo  ========================================
+echo  App closed. Press any key.
 pause >nul
