@@ -44,6 +44,7 @@ echo  OK
 :: ШАГ 2: БИБЛИОТЕКИ
 echo [2/4] Установка библиотек (3-5 минут)...
 pip install -q PyQt6 pynput sounddevice scipy numpy pyperclip pyautogui 2>nul
+pip install -q mss opencv-python imageio-ffmpeg 2>nul
 echo  OK
 
 :: ШАГ 3: WHISPER
