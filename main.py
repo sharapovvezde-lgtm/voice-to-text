@@ -1,10 +1,11 @@
 # main.py - Whisper Quick-Type
-# Голосовой ввод текста
+# Голосовой ввод + запись встреч
 
 import sys
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
@@ -15,7 +16,8 @@ sys.path.insert(0, APP_DIR)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QCheckBox, QPushButton, QSystemTrayIcon,
-    QMenu, QGroupBox, QProgressBar, QTextEdit
+    QMenu, QGroupBox, QProgressBar, QTextEdit, QTabWidget,
+    QListWidget, QListWidgetItem, QMessageBox, QScrollArea
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread
 from PyQt6.QtGui import QIcon, QCursor, QPixmap, QPainter, QColor, QTextCursor
@@ -28,6 +30,13 @@ from utils import (
     set_autostart, is_autostart_enabled,
     save_settings, load_settings
 )
+
+try:
+    from meeting_recorder import MeetingRecorder
+    from meeting_transcriber import MeetingTranscriber
+    MEETING_OK = True
+except Exception:
+    MEETING_OK = False
 
 
 class RecordingIndicator(QWidget):
@@ -107,6 +116,29 @@ class TranscribeWorker(QThread):
         self.finished.emit(text.strip())
 
 
+class MeetingTranscribeWorker(QThread):
+    finished = pyqtSignal(dict)
+    progress = pyqtSignal(str)
+    
+    def __init__(self, transcriber, video_path):
+        super().__init__()
+        self.transcriber = transcriber
+        self.video_path = video_path
+    
+    def run(self):
+        try:
+            self.progress.emit("Загрузка...")
+            self.transcriber.load_model()
+            self.progress.emit("Расшифровка...")
+            result = self.transcriber.transcribe_meeting(video_path=self.video_path)
+            self.progress.emit("Сохранение...")
+            report_path = self.transcriber.save_report(result, video_path=self.video_path)
+            result["report_path"] = report_path
+            self.finished.emit(result)
+        except Exception as e:
+            self.finished.emit({"error": str(e)})
+
+
 class Signals(QObject):
     start_rec = pyqtSignal()
     stop_rec = pyqtSignal()
@@ -129,6 +161,22 @@ class MainWindow(QMainWindow):
         
         self._recording = False
         self._processing = False
+        self._meeting_recording = False
+        self._meeting_start_time = None
+        
+        if MEETING_OK:
+            try:
+                self.meeting_recorder = MeetingRecorder(output_dir=os.path.join(APP_DIR, "temp_records"))
+                self.meeting_transcriber = MeetingTranscriber(model_name="medium")
+            except Exception:
+                self.meeting_recorder = None
+                self.meeting_transcriber = None
+        else:
+            self.meeting_recorder = None
+            self.meeting_transcriber = None
+        
+        self.setWindowTitle("Whisper Quick-Type")
+        self.setFixedSize(500, 620)
         
         self._init_ui()
         self._init_tray()
@@ -144,48 +192,48 @@ class MainWindow(QMainWindow):
         )
         self.hotkey.start()
         
-        self._log(f"🚀 Готов! Горячие клавиши: {self.hotkey.get_hotkey_string()}")
+        if MEETING_OK:
+            self._init_meeting_hotkey()
+        
+        self._log(f"Готов. Горячие клавиши: {self.hotkey.get_hotkey_string()}")
         QTimer.singleShot(300, self._load_model)
     
     def _init_ui(self):
         w = QWidget()
         self.setCentralWidget(w)
-        lay = QVBoxLayout(w)
-        lay.setSpacing(8)
-        lay.setContentsMargins(12, 12, 12, 12)
+        main_lay = QVBoxLayout(w)
+        main_lay.setContentsMargins(12, 12, 12, 12)
         
-        # Заголовок
-        title = QLabel("🎤 Whisper Quick-Type")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #1976D2;")
+        self.tabs = QTabWidget()
+        
+        # --- Вкладка Голос ---
+        voice_tab = QWidget()
+        lay = QVBoxLayout(voice_tab)
+        lay.setSpacing(8)
+        
+        title = QLabel("Голосовой ввод")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #1976D2;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
         
-        # === ГОРЯЧИЕ КЛАВИШИ ===
-        hk_group = QGroupBox("⌨️ Горячие клавиши")
+        hk_group = QGroupBox("Горячие клавиши")
         hk_lay = QHBoxLayout(hk_group)
-        
         self.mod_combo = QComboBox()
         self.mod_combo.addItems(MODIFIER_LIST)
         hk_lay.addWidget(QLabel("Мод:"))
         hk_lay.addWidget(self.mod_combo)
-        
         hk_lay.addWidget(QLabel("+"))
-        
         self.key1_combo = QComboBox()
         self.key1_combo.addItems(KEY_LIST)
         hk_lay.addWidget(self.key1_combo)
-        
         hk_lay.addWidget(QLabel("+"))
-        
         self.key2_combo = QComboBox()
         self.key2_combo.addItems(KEY_LIST)
         hk_lay.addWidget(self.key2_combo)
-        
-        btn_apply = QPushButton("✓")
+        btn_apply = QPushButton("OK")
         btn_apply.setFixedWidth(40)
         btn_apply.clicked.connect(self._apply_hotkey)
         hk_lay.addWidget(btn_apply)
-        
         lay.addWidget(hk_group)
         
         self.hk_label = QLabel()
@@ -193,66 +241,116 @@ class MainWindow(QMainWindow):
         self.hk_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.hk_label)
         
-        # === МОДЕЛЬ ===
-        m_group = QGroupBox("🧠 Модель Whisper")
+        m_group = QGroupBox("Модель Whisper")
         m_lay = QVBoxLayout(m_group)
-        
         self.model_combo = QComboBox()
         self.model_combo.currentIndexChanged.connect(self._on_model_change)
         m_lay.addWidget(self.model_combo)
-        
         self.model_status = QLabel("...")
         self.model_status.setStyleSheet("color: #888;")
         m_lay.addWidget(self.model_status)
-        
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.hide()
         m_lay.addWidget(self.progress)
-        
         lay.addWidget(m_group)
         
-        # === МИКРОФОН ===
-        mic_group = QGroupBox("🎙️ Микрофон")
+        mic_group = QGroupBox("Микрофон")
         mic_lay = QVBoxLayout(mic_group)
         self.mic_combo = QComboBox()
         self.mic_combo.currentIndexChanged.connect(self._on_mic_change)
         mic_lay.addWidget(self.mic_combo)
         lay.addWidget(mic_group)
         
-        # === ЛОГ ===
-        log_group = QGroupBox("📋 Лог")
-        log_lay = QVBoxLayout(log_group)
+        self.log_frame = QGroupBox("Лог")
+        log_lay = QVBoxLayout(self.log_frame)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(120)
-        self.log_text.setStyleSheet("""
-            background: #1a1a1a; color: #0f0;
-            font-family: Consolas; font-size: 10px;
-        """)
+        self.log_text.setMaximumHeight(100)
+        self.log_text.setStyleSheet("background: #1a1a1a; color: #0f0; font-family: Consolas; font-size: 10px;")
         log_lay.addWidget(self.log_text)
-        lay.addWidget(log_group)
+        self.log_frame.hide()
+        lay.addWidget(self.log_frame)
         
-        # === НАСТРОЙКИ ===
+        btn_show_log = QPushButton("Показать лог")
+        btn_show_log.clicked.connect(lambda: (self.log_frame.setVisible(not self.log_frame.isVisible()), btn_show_log.setText("Скрыть лог" if self.log_frame.isVisible() else "Показать лог")))
+        lay.addWidget(btn_show_log)
+        
         self.autostart_cb = QCheckBox("Автозапуск с Windows")
         self.autostart_cb.stateChanged.connect(self._on_autostart)
         lay.addWidget(self.autostart_cb)
         
-        # === КНОПКИ ===
         btn_lay = QHBoxLayout()
-        
         btn_hide = QPushButton("В трей")
         btn_hide.clicked.connect(self.hide)
         btn_lay.addWidget(btn_hide)
-        
         btn_quit = QPushButton("Выход")
         btn_quit.setStyleSheet("background: #c00;")
         btn_quit.clicked.connect(self._quit)
         btn_lay.addWidget(btn_quit)
-        
         lay.addLayout(btn_lay)
         
-        # Заполняем
+        self.tabs.addTab(voice_tab, "Голос")
+        
+        # --- Вкладка Встречи ---
+        if MEETING_OK and self.meeting_recorder:
+            meeting_tab = QWidget()
+            m_lay = QVBoxLayout(meeting_tab)
+            
+            ctrl_group = QGroupBox("Запись экрана")
+            ctrl_layout = QVBoxLayout(ctrl_group)
+            btn_row = QHBoxLayout()
+            self.btn_start_meeting = QPushButton("НАЧАТЬ ЗАПИСЬ")
+            self.btn_start_meeting.setStyleSheet("QPushButton { background: #4CAF50; color: white; font-weight: bold; padding: 12px; }")
+            self.btn_start_meeting.setMinimumHeight(45)
+            self.btn_start_meeting.clicked.connect(self._start_meeting_recording)
+            btn_row.addWidget(self.btn_start_meeting)
+            self.btn_stop_meeting = QPushButton("СТОП")
+            self.btn_stop_meeting.setStyleSheet("QPushButton { background: #f44336; color: white; font-weight: bold; padding: 12px; } QPushButton:disabled { background: #999; }")
+            self.btn_stop_meeting.setMinimumHeight(45)
+            self.btn_stop_meeting.setEnabled(False)
+            self.btn_stop_meeting.clicked.connect(self._stop_meeting_recording)
+            btn_row.addWidget(self.btn_stop_meeting)
+            ctrl_layout.addLayout(btn_row)
+            self.meeting_status = QLabel("Готов к записи")
+            self.meeting_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ctrl_layout.addWidget(self.meeting_status)
+            self.meeting_timer_label = QLabel("00:00:00")
+            self.meeting_timer_label.setStyleSheet("font-size: 20px; font-weight: bold;")
+            self.meeting_timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ctrl_layout.addWidget(self.meeting_timer_label)
+            self._meeting_timer = QTimer()
+            self._meeting_timer.timeout.connect(self._update_meeting_timer)
+            m_lay.addWidget(ctrl_group)
+            
+            rec_group = QGroupBox("Записи")
+            rec_layout = QVBoxLayout(rec_group)
+            self.recordings_list = QListWidget()
+            self.recordings_list.setMinimumHeight(100)
+            self.recordings_list.itemDoubleClicked.connect(self._open_recording)
+            rec_layout.addWidget(self.recordings_list)
+            rec_btn = QHBoxLayout()
+            btn_transcribe = QPushButton("РАСШИФРОВАТЬ")
+            btn_transcribe.setStyleSheet("background: #FF9800; font-weight: bold;")
+            btn_transcribe.clicked.connect(self._transcribe_selected)
+            rec_btn.addWidget(btn_transcribe)
+            btn_folder = QPushButton("Папка")
+            btn_folder.clicked.connect(self._open_records_folder)
+            rec_btn.addWidget(btn_folder)
+            rec_layout.addLayout(rec_btn)
+            m_lay.addWidget(rec_group)
+            
+            self.tabs.addTab(meeting_tab, "Встречи")
+            try:
+                self._refresh_recordings()
+            except Exception:
+                pass
+        else:
+            self.btn_start_meeting = self.btn_stop_meeting = None
+            self.meeting_status = self.meeting_timer_label = self.recordings_list = None
+            self._meeting_timer = QTimer()
+        
+        main_lay.addWidget(self.tabs)
         self._refresh_models()
         self._refresh_mics()
     
@@ -521,8 +619,174 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"❌ {e}")
     
+    def _init_meeting_hotkey(self):
+        try:
+            from pynput import keyboard
+            self._meeting_hotkey_pressed = set()
+            def on_press(key):
+                try:
+                    if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                        self._meeting_hotkey_pressed.add('ctrl')
+                    elif key == keyboard.Key.alt_l or key == keyboard.Key.alt_r:
+                        self._meeting_hotkey_pressed.add('alt')
+                    elif key == keyboard.Key.print_screen:
+                        self._meeting_hotkey_pressed.add('prtsc')
+                    if self._meeting_hotkey_pressed == {'ctrl', 'alt', 'prtsc'}:
+                        QTimer.singleShot(0, self._quick_meeting_record)
+                        self._meeting_hotkey_pressed.clear()
+                except Exception:
+                    pass
+            def on_release(key):
+                try:
+                    if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+                        self._meeting_hotkey_pressed.discard('ctrl')
+                    elif key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
+                        self._meeting_hotkey_pressed.discard('alt')
+                    elif key == keyboard.Key.print_screen:
+                        self._meeting_hotkey_pressed.discard('prtsc')
+                except Exception:
+                    pass
+            self._meeting_hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._meeting_hotkey_listener.daemon = True
+            self._meeting_hotkey_listener.start()
+        except Exception:
+            self._meeting_hotkey_listener = None
+    
+    def _quick_meeting_record(self):
+        try:
+            if not self.meeting_recorder:
+                return
+            if self._meeting_recording:
+                self._stop_meeting_recording()
+                if self.tray:
+                    self.tray.showMessage("Запись", "Остановлена", QSystemTrayIcon.MessageIcon.Information, 2000)
+                return
+            self._log("Запись экрана...")
+            if self.tray:
+                self.tray.showMessage("Запись", "REC", QSystemTrayIcon.MessageIcon.Information, 2000)
+            if self.meeting_recorder.start(region=None, mic_device=None, record_system=False):
+                self._meeting_recording = True
+                self._meeting_start_time = time.time()
+                self._meeting_timer.start(1000)
+                if self.btn_start_meeting:
+                    self.btn_start_meeting.setEnabled(False)
+                if self.btn_stop_meeting:
+                    self.btn_stop_meeting.setEnabled(True)
+                if self.meeting_status:
+                    self.meeting_status.setText("ЗАПИСЬ")
+        except Exception as e:
+            self._log(str(e))
+    
+    def _start_meeting_recording(self):
+        try:
+            if self._meeting_recording or not self.meeting_recorder:
+                return
+            self._log("Начинаю запись...")
+            if self.meeting_recorder.start(region=None, mic_device=None, record_system=False):
+                self._meeting_recording = True
+                self._meeting_start_time = time.time()
+                self._meeting_timer.start(1000)
+                if self.btn_start_meeting:
+                    self.btn_start_meeting.setEnabled(False)
+                if self.btn_stop_meeting:
+                    self.btn_stop_meeting.setEnabled(True)
+                if self.meeting_status:
+                    self.meeting_status.setText("ЗАПИСЬ")
+        except Exception as e:
+            self._log(str(e))
+    
+    def _stop_meeting_recording(self):
+        try:
+            if not self._meeting_recording:
+                return
+            self._meeting_recording = False
+            self._meeting_timer.stop()
+            result = self.meeting_recorder.stop() if self.meeting_recorder else None
+            if self.btn_start_meeting:
+                self.btn_start_meeting.setEnabled(True)
+            if self.btn_stop_meeting:
+                self.btn_stop_meeting.setEnabled(False)
+            if self.meeting_status:
+                self.meeting_status.setText("Готов")
+            if result and result.get("video"):
+                self._log("Видео сохранено")
+                self._refresh_recordings()
+        except Exception as e:
+            self._log(str(e))
+    
+    def _update_meeting_timer(self):
+        if self._meeting_start_time and self.meeting_timer_label:
+            elapsed = int(time.time() - self._meeting_start_time)
+            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+            self.meeting_timer_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
+    
+    def _refresh_recordings(self):
+        if not hasattr(self, 'recordings_list') or not self.recordings_list:
+            return
+        self.recordings_list.clear()
+        records_dir = Path(APP_DIR) / "temp_records"
+        if records_dir.exists():
+            for f in sorted(records_dir.glob("Meeting_*.mp4"), key=os.path.getmtime, reverse=True)[:15]:
+                self.recordings_list.addItem(QListWidgetItem(f.name))
+                self.recordings_list.item(self.recordings_list.count() - 1).setData(Qt.ItemDataRole.UserRole, f.stem)
+    
+    def _transcribe_selected(self):
+        if not hasattr(self, 'recordings_list') or not self.recordings_list or not self.meeting_transcriber:
+            return
+        item = self.recordings_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Ошибка", "Выберите запись")
+            return
+        base_name = item.data(Qt.ItemDataRole.UserRole)
+        records_dir = Path(APP_DIR) / "temp_records"
+        video_path = records_dir / f"{base_name}.mp4"
+        if not video_path.exists():
+            QMessageBox.warning(self, "Ошибка", "Видео не найдено")
+            return
+        if self.meeting_status:
+            self.meeting_status.setText("Расшифровка...")
+        self._transcribe_worker = MeetingTranscribeWorker(self.meeting_transcriber, str(video_path))
+        self._transcribe_worker.progress.connect(lambda s: self._log(s))
+        self._transcribe_worker.finished.connect(self._on_meeting_transcribed)
+        self._transcribe_worker.start()
+    
+    def _on_meeting_transcribed(self, result):
+        if self.meeting_status:
+            self.meeting_status.setText("Готов")
+        if result.get("error"):
+            self._log(result["error"])
+            QMessageBox.critical(self, "Ошибка", result["error"])
+            return
+        path = result.get("report_path")
+        if path:
+            self._log(f"Отчёт: {path}")
+            QMessageBox.information(self, "Готово", f"Расшифровка сохранена:\n{path}")
+    
+    def _open_recording(self, item):
+        if not item:
+            return
+        base_name = item.data(Qt.ItemDataRole.UserRole)
+        video_path = Path(APP_DIR) / "temp_records" / f"{base_name}.mp4"
+        if video_path.exists():
+            os.startfile(str(video_path))
+    
+    def _open_records_folder(self):
+        folder = Path(APP_DIR) / "temp_records"
+        folder.mkdir(exist_ok=True)
+        os.startfile(str(folder))
+    
     def _quit(self):
+        if self._meeting_recording:
+            try:
+                self._stop_meeting_recording()
+            except Exception:
+                pass
         self.hotkey.stop()
+        if hasattr(self, '_meeting_hotkey_listener') and self._meeting_hotkey_listener:
+            try:
+                self._meeting_hotkey_listener.stop()
+            except Exception:
+                pass
         self.tray.hide()
         QApplication.quit()
     

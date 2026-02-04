@@ -23,3 +23,15 @@ pyautogui
 
 # Сборка в EXE
 pyinstaller
+
+# ===== Meeting Recorder (Этап 2-3) =====
+# Захват экрана
+mss
+opencv-python
+Pillow
+
+# FFmpeg для объединения видео и аудио
+imageio-ffmpeg
+
+# Выбор окна для записи
+pygetwindow

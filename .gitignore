@@ -24,3 +24,22 @@ launch.vbs
 # Временные файлы
 *.tmp
 *.temp
+
+# ===== DEV / Meeting Recorder =====
+# Переменные окружения (API ключи)
+.env
+
+# Временные записи встреч
+dev_test/temp_records/
+temp_records/
+records/
+
+# Видеофайлы
+*.mp4
+*.mkv
+*.avi
+*.wav
+
+# FFmpeg временные файлы
+*.ts
+*.m3u8
