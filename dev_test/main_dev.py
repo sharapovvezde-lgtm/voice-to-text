@@ -122,12 +122,10 @@ class MeetingTranscribeWorker(QThread):
     finished = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, transcriber: MeetingTranscriber, mic_path: str, sys_path: str, output_dir: str):
+    def __init__(self, transcriber: MeetingTranscriber, video_path: str):
         super().__init__()
         self.transcriber = transcriber
-        self.mic_path = mic_path
-        self.sys_path = sys_path
-        self.output_dir = output_dir
+        self.video_path = video_path
     
     def run(self):
         try:
@@ -135,19 +133,10 @@ class MeetingTranscribeWorker(QThread):
             self.transcriber.load_model()
             
             self.progress.emit("Транскрибация...")
-            result = self.transcriber.transcribe_meeting(
-                mic_audio_path=self.mic_path,
-                sys_audio_path=self.sys_path
-            )
+            result = self.transcriber.transcribe_meeting(video_path=self.video_path)
             
             self.progress.emit("Сохранение...")
-            if self.mic_path:
-                base = Path(self.mic_path).stem.replace("_mic", "")
-                report_path = str(Path(self.output_dir) / f"{base}_transcript.txt")
-            else:
-                report_path = str(Path(self.output_dir) / f"Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-            
-            report_path = self.transcriber.save_report(result, output_path=report_path)
+            report_path = self.transcriber.save_report(result, video_path=self.video_path)
             result["report_path"] = report_path
             
             self.finished.emit(result)
@@ -182,10 +171,15 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         
         # DEV: Meeting Recorder
-        self.meeting_recorder = MeetingRecorder(
-            output_dir=os.path.join(DEV_DIR, "temp_records")
-        )
-        self.meeting_transcriber = MeetingTranscriber(model_name="base")
+        try:
+            self.meeting_recorder = MeetingRecorder(
+                output_dir=os.path.join(DEV_DIR, "temp_records")
+            )
+            self.meeting_transcriber = MeetingTranscriber(model_name="medium")
+        except Exception as e:
+            print(f"Meeting init error: {e}")
+            self.meeting_recorder = None
+            self.meeting_transcriber = None
         
         self._recording = False
         self._processing = False
@@ -356,121 +350,60 @@ class MainWindow(QMainWindow):
         self._refresh_mics()
     
     def _build_meeting_tab(self, layout):
-        """Вкладка записи встреч — профессиональная вёрстка"""
+        """Вкладка записи встреч — простой интерфейс"""
         
-        # ====== БЛОК 1: ВЫБОР ОБЛАСТИ ======
-        area_group = QGroupBox("🎯 ШАГ 1: Выберите область записи")
-        area_group.setStyleSheet("""
-            QGroupBox { font-weight: bold; font-size: 13px; 
-                       border: 2px solid #9C27B0; border-radius: 8px;
-                       margin-top: 10px; padding-top: 10px; }
-            QGroupBox::title { color: #9C27B0; }
-        """)
-        area_layout = QVBoxLayout(area_group)
-        area_layout.setSpacing(10)
+        if not self.meeting_recorder:
+            layout.addWidget(QLabel("❌ Модуль записи недоступен"))
+            return
         
-        btn_select = QPushButton("📐 ВЫБРАТЬ ОБЛАСТЬ ЭКРАНА")
-        btn_select.setStyleSheet("""
-            QPushButton { background: #9C27B0; color: white; font-size: 14px; 
-                         font-weight: bold; padding: 15px; border-radius: 8px; }
-            QPushButton:hover { background: #7B1FA2; }
-        """)
-        btn_select.setMinimumHeight(50)
-        btn_select.clicked.connect(self._select_screen_region)
-        area_layout.addWidget(btn_select)
-        
-        self.region_label = QLabel("⚠️ Область НЕ выбрана — запись невозможна")
-        self.region_label.setStyleSheet("""
-            QLabel { color: #c62828; font-weight: bold; padding: 10px; 
-                    background: #ffebee; border-radius: 5px; }
-        """)
-        self.region_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        area_layout.addWidget(self.region_label)
-        
-        layout.addWidget(area_group)
-        
-        # ====== БЛОК 2: АУДИО ======
-        audio_group = QGroupBox("🎤 ШАГ 2: Настройте звук")
-        audio_group.setStyleSheet("""
-            QGroupBox { font-weight: bold; font-size: 13px; 
-                       border: 2px solid #2196F3; border-radius: 8px;
-                       margin-top: 10px; padding-top: 10px; }
-            QGroupBox::title { color: #2196F3; }
-        """)
-        audio_layout = QVBoxLayout(audio_group)
-        audio_layout.setSpacing(8)
-        
-        # Микрофон
-        mic_row = QHBoxLayout()
-        mic_row.addWidget(QLabel("🎤 Микрофон (Я):"))
-        self.meeting_mic_combo = QComboBox()
-        self.meeting_mic_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._refresh_meeting_mics()
-        mic_row.addWidget(self.meeting_mic_combo, 1)
-        audio_layout.addLayout(mic_row)
-        
-        # Информация
-        info_label = QLabel("💡 Записывается звук с микрофона")
-        info_label.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
-        audio_layout.addWidget(info_label)
-        
-        layout.addWidget(audio_group)
-        
-        # ====== БЛОК 3: УПРАВЛЕНИЕ ======
-        ctrl_group = QGroupBox("⏯️ ШАГ 3: Управление записью")
-        ctrl_group.setStyleSheet("""
-            QGroupBox { font-weight: bold; font-size: 13px; 
-                       border: 2px solid #4CAF50; border-radius: 8px;
-                       margin-top: 10px; padding-top: 10px; }
-            QGroupBox::title { color: #4CAF50; }
-        """)
+        # ====== УПРАВЛЕНИЕ ======
+        ctrl_group = QGroupBox("📹 Запись экрана")
         ctrl_layout = QVBoxLayout(ctrl_group)
         
+        # Кнопки
         btn_row = QHBoxLayout()
         
         self.btn_start_meeting = QPushButton("▶️ НАЧАТЬ ЗАПИСЬ")
         self.btn_start_meeting.setStyleSheet("""
-            QPushButton { background: #4CAF50; color: white; font-size: 14px;
-                         font-weight: bold; padding: 12px; border-radius: 8px; }
+            QPushButton { background: #4CAF50; color: white; font-size: 16px;
+                         font-weight: bold; padding: 15px; border-radius: 8px; }
             QPushButton:hover { background: #388E3C; }
-            QPushButton:disabled { background: #9E9E9E; }
         """)
-        self.btn_start_meeting.setMinimumHeight(45)
+        self.btn_start_meeting.setMinimumHeight(50)
         self.btn_start_meeting.clicked.connect(self._start_meeting_recording)
         btn_row.addWidget(self.btn_start_meeting)
         
-        self.btn_stop_meeting = QPushButton("⏹️ ОСТАНОВИТЬ")
+        self.btn_stop_meeting = QPushButton("⏹️ СТОП")
         self.btn_stop_meeting.setStyleSheet("""
-            QPushButton { background: #f44336; color: white; font-size: 14px;
-                         font-weight: bold; padding: 12px; border-radius: 8px; }
+            QPushButton { background: #f44336; color: white; font-size: 16px;
+                         font-weight: bold; padding: 15px; border-radius: 8px; }
             QPushButton:hover { background: #D32F2F; }
             QPushButton:disabled { background: #9E9E9E; }
         """)
-        self.btn_stop_meeting.setMinimumHeight(45)
+        self.btn_stop_meeting.setMinimumHeight(50)
         self.btn_stop_meeting.setEnabled(False)
         self.btn_stop_meeting.clicked.connect(self._stop_meeting_recording)
         btn_row.addWidget(self.btn_stop_meeting)
         
         ctrl_layout.addLayout(btn_row)
         
-        # Статус и таймер
-        status_row = QHBoxLayout()
-        
-        self.meeting_status = QLabel("⏸️ Ожидание")
+        # Статус
+        self.meeting_status = QLabel("⏸️ Готов к записи")
         self.meeting_status.setStyleSheet("""
-            QLabel { font-size: 12px; padding: 8px; background: #424242; 
-                    color: white; border-radius: 5px; }
+            QLabel { font-size: 14px; padding: 10px; background: #424242; 
+                    color: white; border-radius: 5px; text-align: center; }
         """)
-        status_row.addWidget(self.meeting_status, 1)
+        self.meeting_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ctrl_layout.addWidget(self.meeting_status)
         
+        # Таймер
         self.meeting_timer_label = QLabel("00:00:00")
         self.meeting_timer_label.setStyleSheet("""
-            QLabel { font-size: 20px; font-weight: bold; color: #1976D2; 
-                    padding: 5px 15px; background: #E3F2FD; border-radius: 5px; }
+            QLabel { font-size: 24px; font-weight: bold; color: #1976D2; 
+                    padding: 10px; background: #E3F2FD; border-radius: 5px; }
         """)
-        status_row.addWidget(self.meeting_timer_label)
-        
-        ctrl_layout.addLayout(status_row)
+        self.meeting_timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ctrl_layout.addWidget(self.meeting_timer_label)
         
         self._meeting_timer = QTimer()
         self._meeting_timer.timeout.connect(self._update_meeting_timer)
@@ -478,28 +411,22 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(ctrl_group)
         
-        # ====== БЛОК 4: ЗАПИСИ ======
+        # ====== ЗАПИСИ ======
         rec_group = QGroupBox("📁 Записи")
         rec_layout = QVBoxLayout(rec_group)
         
         self.recordings_list = QListWidget()
-        self.recordings_list.setMaximumHeight(100)
-        self.recordings_list.setStyleSheet("""
-            QListWidget { border: 1px solid #ccc; border-radius: 5px; }
-            QListWidget::item { padding: 5px; }
-            QListWidget::item:selected { background: #E3F2FD; color: black; }
-        """)
+        self.recordings_list.setMinimumHeight(120)
         self.recordings_list.itemDoubleClicked.connect(self._open_recording)
         rec_layout.addWidget(self.recordings_list)
         
         rec_btn_row = QHBoxLayout()
         
-        btn_refresh = QPushButton("🔄 Обновить")
-        btn_refresh.clicked.connect(self._refresh_recordings)
-        rec_btn_row.addWidget(btn_refresh)
-        
-        btn_transcribe = QPushButton("📝 Транскрибировать")
-        btn_transcribe.setStyleSheet("background: #FF9800;")
+        btn_transcribe = QPushButton("📝 РАСШИФРОВАТЬ")
+        btn_transcribe.setStyleSheet("""
+            QPushButton { background: #FF9800; color: white; font-size: 14px;
+                         font-weight: bold; padding: 10px; border-radius: 5px; }
+        """)
         btn_transcribe.clicked.connect(self._transcribe_selected)
         rec_btn_row.addWidget(btn_transcribe)
         
@@ -510,7 +437,12 @@ class MainWindow(QMainWindow):
         rec_layout.addLayout(rec_btn_row)
         layout.addWidget(rec_group)
         
-        self._refresh_recordings()
+        layout.addStretch()
+        
+        try:
+            self._refresh_recordings()
+        except:
+            pass
     
     def _init_meeting_hotkey(self):
         """Инициализация горячей клавиши Ctrl+Alt+PrintScreen для быстрой записи"""
@@ -554,19 +486,34 @@ class MainWindow(QMainWindow):
         self._meeting_hotkey_listener.start()
     
     def _quick_meeting_record(self):
-        """Быстрая запись встречи: выбор области → автостарт"""
-        if self._meeting_recording:
-            # Если уже идёт запись - останавливаем
-            self._stop_meeting_recording()
-            self.tray.showMessage("Запись встречи", "⏹️ Запись остановлена", QSystemTrayIcon.MessageIcon.Information, 2000)
-            return
-        
-        self._log("📹 Быстрая запись: выберите область...")
-        self.tray.showMessage("Запись встречи", "🎯 Выберите область экрана мышкой", QSystemTrayIcon.MessageIcon.Information, 3000)
-        
-        # Запускаем выбор области с автостартом записи
-        self._quick_record_mode = True
-        self._select_screen_region()
+        """Быстрая запись: Ctrl+Alt+PrtScn"""
+        try:
+            if self._meeting_recording:
+                self._stop_meeting_recording()
+                self.tray.showMessage("Запись", "Остановлена", QSystemTrayIcon.MessageIcon.Information, 2000)
+                return
+            
+            if not self.meeting_recorder:
+                return
+            
+            self._log("📹 Запись экрана...")
+            self.tray.showMessage("Запись", "REC", QSystemTrayIcon.MessageIcon.Information, 2000)
+            
+            success = self.meeting_recorder.start(region=None, mic_device=None, record_system=False)
+            
+            if success:
+                self._meeting_recording = True
+                self._meeting_start_time = time.time()
+                self._meeting_timer.start(1000)
+                self.btn_start_meeting.setEnabled(False)
+                self.btn_stop_meeting.setEnabled(True)
+                self.meeting_status.setText("🔴 ЗАПИСЬ")
+                self.meeting_status.setStyleSheet("QLabel { font-size: 14px; padding: 10px; background: #c62828; color: white; border-radius: 5px; }")
+                self._log("🔴 Запись идёт!")
+            else:
+                self._log("❌ Ошибка записи")
+        except Exception as e:
+            self._log(f"❌ Ошибка: {e}")
     
     def _init_tray(self):
         pix = QPixmap(24, 24)
@@ -641,10 +588,8 @@ class MainWindow(QMainWindow):
         self.mic_combo.blockSignals(False)
     
     def _refresh_meeting_mics(self):
-        self.meeting_mic_combo.clear()
-        for mic in self.meeting_recorder.get_microphones():
-            default = " ✓" if mic['is_default'] else ""
-            self.meeting_mic_combo.addItem(f"{mic['name']}{default}", mic['id'])
+        # Не используется в упрощённом интерфейсе
+        pass
     
     
     def _load_settings(self):
@@ -851,81 +796,66 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage("Запись встречи", "❌ Выбор области отменён", QSystemTrayIcon.MessageIcon.Warning, 2000)
     
     def _start_meeting_recording(self):
-        if self._meeting_recording or self._recording:
-            return
-        
-        # ПРОВЕРКА: область ОБЯЗАТЕЛЬНА!
-        if not self._selected_region:
-            QMessageBox.warning(
-                self, "Область не выбрана",
-                "❌ Сначала выберите область экрана!\n\n"
-                "Нажмите кнопку '📐 ВЫБРАТЬ ОБЛАСТЬ ЭКРАНА' и выделите "
-                "область мышкой (зажмите ЛКМ и проведите)."
-            )
-            return
-        
-        mic_id = self.meeting_mic_combo.currentData()
-        
-        self._log(f"📹 Запись: {self._selected_region['width']}x{self._selected_region['height']}")
-        self._log(f"   Координаты: x={self._selected_region['left']}, y={self._selected_region['top']}")
-        
-        success = self.meeting_recorder.start(
-            region=self._selected_region,
-            mic_device=mic_id
-        )
-        
-        if success:
-            self._meeting_recording = True
-            self._meeting_start_time = time.time()
-            self._meeting_timer.start(1000)
+        try:
+            if self._meeting_recording or self._recording:
+                return
             
-            self.indicator.set_meeting_mode(True)
-            self.indicator.start()
+            if not self.meeting_recorder:
+                QMessageBox.warning(self, "Ошибка", "Модуль записи недоступен")
+                return
             
-            self.meeting_status.setText("🔴 ЗАПИСЬ")
-            self.meeting_status.setStyleSheet("""
-                QLabel { font-size: 14px; padding: 8px; background: #c62828;
-                        color: white; border-radius: 5px; font-weight: bold; }
-            """)
+            self._log("📹 Начинаю запись экрана...")
             
-            self.btn_start_meeting.setEnabled(False)
-            self.btn_stop_meeting.setEnabled(True)
+            success = self.meeting_recorder.start(region=None, mic_device=None, record_system=False)
             
-            self._log("✅ Запись началась!")
-        else:
-            self._log("❌ Ошибка запуска")
+            if success:
+                self._meeting_recording = True
+                self._meeting_start_time = time.time()
+                self._meeting_timer.start(1000)
+                
+                self.btn_start_meeting.setEnabled(False)
+                self.btn_stop_meeting.setEnabled(True)
+                
+                self.meeting_status.setText("🔴 ЗАПИСЬ")
+                self.meeting_status.setStyleSheet("""
+                    QLabel { font-size: 14px; padding: 10px; background: #c62828;
+                            color: white; border-radius: 5px; font-weight: bold; }
+                """)
+                
+                self._log("✅ Запись началась!")
+            else:
+                self._log("❌ Ошибка запуска")
+        except Exception as e:
+            self._log(f"❌ Ошибка: {e}")
     
     def _stop_meeting_recording(self):
-        if not self._meeting_recording:
-            return
-        
-        self._log("⏹️ Останавливаю...")
-        
-        self._meeting_recording = False
-        self._meeting_timer.stop()
-        self.indicator.stop()
-        
-        result = self.meeting_recorder.stop()
-        
-        self.meeting_status.setText("⏸️ Ожидание")
-        self.meeting_status.setStyleSheet("""
-            QLabel { font-size: 12px; padding: 8px; background: #424242;
-                    color: white; border-radius: 5px; }
-        """)
-        
-        self.btn_start_meeting.setEnabled(True)
-        self.btn_stop_meeting.setEnabled(False)
-        
-        self._last_recording = result
-        
-        if result:
-            if result.get("video"):
-                self._log(f"✅ Видео сохранено")
-            if result.get("mic_audio"):
-                self._log(f"✅ Аудио сохранено")
-            if result.get("mic_audio"):
-                self._log(f"✅ Аудио сохранено")
-            self._refresh_recordings()
+        try:
+            if not self._meeting_recording:
+                return
+            
+            self._log("⏹️ Останавливаю...")
+            
+            self._meeting_recording = False
+            self._meeting_timer.stop()
+            
+            result = self.meeting_recorder.stop() if self.meeting_recorder else None
+            
+            self.btn_start_meeting.setEnabled(True)
+            self.btn_stop_meeting.setEnabled(False)
+            
+            self.meeting_status.setText("⏸️ Готов")
+            self.meeting_status.setStyleSheet("""
+                QLabel { font-size: 14px; padding: 10px; background: #424242;
+                        color: white; border-radius: 5px; }
+            """)
+            
+            self._last_recording = result
+            
+            if result and result.get("video"):
+                self._log(f"✅ Видео сохранено: {result['base_name']}")
+                self._refresh_recordings()
+        except Exception as e:
+            self._log(f"❌ Ошибка остановки: {e}")
     
     def _update_meeting_timer(self):
         if self._meeting_start_time:
@@ -946,13 +876,8 @@ class MainWindow(QMainWindow):
                 files = sorted(records_dir.glob("Meeting_*.avi"), key=os.path.getmtime, reverse=True)
             
             for f in files[:10]:
-                base_name = f.stem
-                mic_exists = (records_dir / f"{base_name}_mic.wav").exists()
-                
-                icons = " 🎤" if mic_exists else ""
-                
-                item = QListWidgetItem(f"📹 {f.name}{icons}")
-                item.setData(Qt.ItemDataRole.UserRole, base_name)
+                item = QListWidgetItem(f"📹 {f.name}")
+                item.setData(Qt.ItemDataRole.UserRole, f.stem)
                 self.recordings_list.addItem(item)
     
     def _open_recording(self, item):
@@ -976,21 +901,21 @@ class MainWindow(QMainWindow):
         base_name = item.data(Qt.ItemDataRole.UserRole)
         records_dir = Path(DEV_DIR) / "temp_records"
         
-        mic_path = records_dir / f"{base_name}_mic.wav"
-        sys_path = records_dir / f"{base_name}_sys.wav"
+        # Find video
+        video_path = records_dir / f"{base_name}.mp4"
+        if not video_path.exists():
+            video_path = records_dir / f"{base_name}.avi"
         
-        mic_str = str(mic_path) if mic_path.exists() else None
-        sys_str = str(sys_path) if sys_path.exists() else None
-        
-        if not mic_str and not sys_str:
-            QMessageBox.warning(self, "Ошибка", "Аудиофайлы не найдены")
+        if not video_path.exists():
+            QMessageBox.warning(self, "Ошибка", "Видео не найдено")
             return
         
-        self._log(f"📝 Транскрибация: {base_name}")
+        self._log(f"📝 Транскрибация: {video_path.name}")
         self.meeting_status.setText("⏳ Транскрибация...")
         
         self._transcribe_worker = MeetingTranscribeWorker(
-            self.meeting_transcriber, mic_str, sys_str, str(records_dir)
+            self.meeting_transcriber, 
+            str(video_path)
         )
         self._transcribe_worker.progress.connect(lambda s: self._log(f"   {s}"))
         self._transcribe_worker.finished.connect(self._on_meeting_transcribed)

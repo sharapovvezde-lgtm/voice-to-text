@@ -7,11 +7,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Один источник правды: папка, где лежит main.py (или exe)
 if getattr(sys, 'frozen', False):
-    APP_DIR = os.path.dirname(sys.executable)
+    _app_base = Path(sys.executable).resolve().parent
 else:
-    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    _app_base = Path(__file__).resolve().parent
+APP_DIR = str(_app_base)
 sys.path.insert(0, APP_DIR)
+
+RECORDS_DIR = _app_base / "records"
+LOG_FILE = _app_base / "logs.txt"
+MAX_LOG_LINES_IN_MEMORY = 300  # лимит строк в виджете лога, чтобы не копить в RAM
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -19,7 +25,7 @@ from PyQt6.QtWidgets import (
     QMenu, QGroupBox, QProgressBar, QTextEdit, QTabWidget,
     QListWidget, QListWidgetItem, QMessageBox, QScrollArea
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QEvent
 from PyQt6.QtGui import QIcon, QCursor, QPixmap, QPainter, QColor, QTextCursor
 
 from recorder import AudioRecorder
@@ -150,7 +156,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Whisper Quick-Type")
-        self.setFixedSize(480, 580)
+        self.setMinimumSize(700, 800)
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                geom = screen.availableGeometry()
+                self.resize(int(geom.width() * 0.5), int(geom.height() * 0.85))
+            else:
+                self.resize(700, 800)
+        except Exception:
+            self.resize(700, 800)
         
         self.recorder = AudioRecorder()
         self.transcriber = get_transcriber()
@@ -166,7 +181,8 @@ class MainWindow(QMainWindow):
         
         if MEETING_OK:
             try:
-                self.meeting_recorder = MeetingRecorder(output_dir=os.path.join(APP_DIR, "temp_records"))
+                RECORDS_DIR.mkdir(parents=True, exist_ok=True)
+                self.meeting_recorder = MeetingRecorder(output_dir=str(RECORDS_DIR.resolve()))
                 self.meeting_transcriber = MeetingTranscriber(model_name="medium")
             except Exception:
                 self.meeting_recorder = None
@@ -176,8 +192,6 @@ class MainWindow(QMainWindow):
             self.meeting_transcriber = None
         
         self.setWindowTitle("Whisper Quick-Type")
-        self.setFixedSize(500, 620)
-        
         self._init_ui()
         self._init_tray()
         self._load_settings()
@@ -196,15 +210,18 @@ class MainWindow(QMainWindow):
             self._init_meeting_hotkey()
         
         self._log(f"Готов. Горячие клавиши: {self.hotkey.get_hotkey_string()}")
+        self._log(f"Папка приложения: {Path(APP_DIR).resolve()}")
         QTimer.singleShot(300, self._load_model)
     
     def _init_ui(self):
         w = QWidget()
         self.setCentralWidget(w)
         main_lay = QVBoxLayout(w)
-        main_lay.setContentsMargins(12, 12, 12, 12)
+        main_lay.setContentsMargins(15, 15, 15, 15)
+        main_lay.setSpacing(10)
         
         self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         
         # --- Вкладка Голос ---
         voice_tab = QWidget()
@@ -266,13 +283,13 @@ class MainWindow(QMainWindow):
         log_lay = QVBoxLayout(self.log_frame)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(100)
+        self.log_text.setMinimumHeight(80)
+        self.log_text.setMaximumHeight(150)
         self.log_text.setStyleSheet("background: #1a1a1a; color: #0f0; font-family: Consolas; font-size: 10px;")
         log_lay.addWidget(self.log_text)
-        self.log_frame.hide()
         lay.addWidget(self.log_frame)
         
-        btn_show_log = QPushButton("Показать лог")
+        btn_show_log = QPushButton("Скрыть лог")
         btn_show_log.clicked.connect(lambda: (self.log_frame.setVisible(not self.log_frame.isVisible()), btn_show_log.setText("Скрыть лог" if self.log_frame.isVisible() else "Показать лог")))
         lay.addWidget(btn_show_log)
         
@@ -326,14 +343,22 @@ class MainWindow(QMainWindow):
             rec_group = QGroupBox("Записи")
             rec_layout = QVBoxLayout(rec_group)
             self.recordings_list = QListWidget()
-            self.recordings_list.setMinimumHeight(100)
+            self.recordings_list.setMinimumHeight(180)
             self.recordings_list.itemDoubleClicked.connect(self._open_recording)
             rec_layout.addWidget(self.recordings_list)
+            self.records_path_label = QLabel()
+            self.records_path_label.setStyleSheet("color: #666; font-size: 10px;")
+            self.records_path_label.setWordWrap(True)
+            self.records_path_label.setText("Папка: " + str(RECORDS_DIR.resolve()))
+            rec_layout.addWidget(self.records_path_label)
             rec_btn = QHBoxLayout()
             btn_transcribe = QPushButton("РАСШИФРОВАТЬ")
             btn_transcribe.setStyleSheet("background: #FF9800; font-weight: bold;")
             btn_transcribe.clicked.connect(self._transcribe_selected)
             rec_btn.addWidget(btn_transcribe)
+            btn_refresh = QPushButton("Обновить")
+            btn_refresh.clicked.connect(self._refresh_recordings)
+            rec_btn.addWidget(btn_refresh)
             btn_folder = QPushButton("Папка")
             btn_folder.clicked.connect(self._open_records_folder)
             rec_btn.addWidget(btn_folder)
@@ -341,16 +366,13 @@ class MainWindow(QMainWindow):
             m_lay.addWidget(rec_group)
             
             self.tabs.addTab(meeting_tab, "Встречи")
-            try:
-                self._refresh_recordings()
-            except Exception:
-                pass
+            self._refresh_recordings()
         else:
             self.btn_start_meeting = self.btn_stop_meeting = None
             self.meeting_status = self.meeting_timer_label = self.recordings_list = None
             self._meeting_timer = QTimer()
         
-        main_lay.addWidget(self.tabs)
+        main_lay.addWidget(self.tabs, 1)
         self._refresh_models()
         self._refresh_mics()
     
@@ -364,15 +386,15 @@ class MainWindow(QMainWindow):
         p.drawEllipse(2, 2, 20, 20)
         p.end()
         
-        self.tray = QSystemTrayIcon(QIcon(pix), self)
-        
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setIcon(QIcon(pix))
         menu = QMenu()
         menu.addAction("Открыть", self.show)
         menu.addSeparator()
         menu.addAction("Выход", self._quit)
-        
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda r: self.show() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.setVisible(True)
         self.tray.show()
     
     def _update_hk_label(self):
@@ -412,7 +434,21 @@ class MainWindow(QMainWindow):
     
     def _log(self, msg):
         t = datetime.now().strftime("%H:%M:%S")
-        self.log_text.append(f"[{t}] {msg}")
+        line = f"[{t}] {msg}"
+        # Запись в файл — лог не копится в памяти
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+        # В виджете храним только последние N строк
+        self.log_text.append(line)
+        doc = self.log_text.document()
+        if doc.blockCount() > MAX_LOG_LINES_IN_MEMORY:
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(QTextCursor.MoveOperation.Down, QTextCursor.MoveMode.KeepAnchor, doc.blockCount() - MAX_LOG_LINES_IN_MEMORY)
+            cursor.removeSelectedText()
         c = self.log_text.textCursor()
         c.movePosition(QTextCursor.MoveOperation.End)
         self.log_text.setTextCursor(c)
@@ -710,7 +746,8 @@ class MainWindow(QMainWindow):
                 self.meeting_status.setText("Готов")
             if result and result.get("video"):
                 self._log("Видео сохранено")
-                self._refresh_recordings()
+                # Небольшая задержка, чтобы файл точно появился на диске, затем обновить список
+                QTimer.singleShot(400, self._refresh_recordings)
         except Exception as e:
             self._log(str(e))
     
@@ -720,15 +757,50 @@ class MainWindow(QMainWindow):
             h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
             self.meeting_timer_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
     
+    def _on_tab_changed(self, index):
+        if MEETING_OK and hasattr(self, "tabs") and self.tabs and self.tabs.count() > 1 and index == 1:
+            QTimer.singleShot(0, self._refresh_recordings)
+    
     def _refresh_recordings(self):
-        if not hasattr(self, 'recordings_list') or not self.recordings_list:
+        if not hasattr(self, 'recordings_list') or self.recordings_list is None:
             return
         self.recordings_list.clear()
-        records_dir = Path(APP_DIR) / "temp_records"
-        if records_dir.exists():
-            for f in sorted(records_dir.glob("Meeting_*.mp4"), key=os.path.getmtime, reverse=True)[:15]:
-                self.recordings_list.addItem(QListWidgetItem(f.name))
-                self.recordings_list.item(self.recordings_list.count() - 1).setData(Qt.ItemDataRole.UserRole, f.stem)
+        records_path = RECORDS_DIR.resolve()
+        records_path.mkdir(parents=True, exist_ok=True)
+        all_entries = []
+        dirs_to_scan = [records_path]
+        cwd_records = Path(os.getcwd()) / "records"
+        if cwd_records.resolve() != records_path and cwd_records.exists():
+            dirs_to_scan.append(cwd_records.resolve())
+        for scan_dir in dirs_to_scan:
+            try:
+                for name in os.listdir(str(scan_dir)):
+                    if "_tmp" in name:
+                        continue
+                    low = name.lower()
+                    if not (low.endswith(".mp4") or low.endswith(".avi")):
+                        continue
+                    if "meeting_" not in low:
+                        continue
+                    fp = Path(scan_dir) / name
+                    if fp.is_file():
+                        all_entries.append(fp)
+            except OSError:
+                continue
+        seen_stem = set()
+        for f in sorted(all_entries, key=lambda p: os.path.getmtime(p), reverse=True):
+            if f.stem in seen_stem:
+                continue
+            seen_stem.add(f.stem)
+            item = QListWidgetItem(f.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(f.resolve()))
+            self.recordings_list.addItem(item)
+        if hasattr(self, "records_path_label") and self.records_path_label is not None:
+            self.records_path_label.setText("Папка: " + str(records_path) + " — записей: " + str(self.recordings_list.count()))
+        try:
+            self._log("Записей в списке: " + str(self.recordings_list.count()) + ", папка: " + str(records_path))
+        except Exception:
+            pass
     
     def _transcribe_selected(self):
         if not hasattr(self, 'recordings_list') or not self.recordings_list or not self.meeting_transcriber:
@@ -737,9 +809,7 @@ class MainWindow(QMainWindow):
         if not item:
             QMessageBox.warning(self, "Ошибка", "Выберите запись")
             return
-        base_name = item.data(Qt.ItemDataRole.UserRole)
-        records_dir = Path(APP_DIR) / "temp_records"
-        video_path = records_dir / f"{base_name}.mp4"
+        video_path = Path(item.data(Qt.ItemDataRole.UserRole))
         if not video_path.exists():
             QMessageBox.warning(self, "Ошибка", "Видео не найдено")
             return
@@ -747,33 +817,53 @@ class MainWindow(QMainWindow):
             self.meeting_status.setText("Расшифровка...")
         self._transcribe_worker = MeetingTranscribeWorker(self.meeting_transcriber, str(video_path))
         self._transcribe_worker.progress.connect(lambda s: self._log(s))
-        self._transcribe_worker.finished.connect(self._on_meeting_transcribed)
+        self._transcribe_worker.finished.connect(self._on_meeting_transcribed, Qt.ConnectionType.QueuedConnection)
         self._transcribe_worker.start()
     
     def _on_meeting_transcribed(self, result):
         if self.meeting_status:
             self.meeting_status.setText("Готов")
+        if not isinstance(result, dict):
+            self._log("Ошибка: неверный ответ расшифровки")
+            return
         if result.get("error"):
             self._log(result["error"])
-            QMessageBox.critical(self, "Ошибка", result["error"])
+            self.show(); self.raise_(); self.activateWindow()
+            QMessageBox.critical(self, "Ошибка расшифровки", result["error"])
             return
         path = result.get("report_path")
-        if path:
+        if path and os.path.exists(path):
             self._log(f"Отчёт: {path}")
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            QMessageBox.information(self, "Готово", f"Расшифровка сохранена:\n{path}\n\nФайл откроется автоматически.")
+            try:
+                os.startfile(path)
+            except Exception:
+                pass
+        elif path:
+            self._log(f"Отчёт сохранён: {path}")
+            self.show(); self.raise_(); self.activateWindow()
             QMessageBox.information(self, "Готово", f"Расшифровка сохранена:\n{path}")
+        else:
+            self._log("Расшифровка завершена, но путь к отчёту не получен")
+            self.show(); self.raise_(); self.activateWindow()
+            QMessageBox.warning(self, "Внимание", "Расшифровка выполнена, но файл отчёта не найден. Проверьте папку с записью.")
     
     def _open_recording(self, item):
         if not item:
             return
-        base_name = item.data(Qt.ItemDataRole.UserRole)
-        video_path = Path(APP_DIR) / "temp_records" / f"{base_name}.mp4"
-        if video_path.exists():
-            os.startfile(str(video_path))
+        video_path = item.data(Qt.ItemDataRole.UserRole)
+        if video_path is None:
+            return
+        p = Path(str(video_path))
+        if p.exists():
+            os.startfile(str(p))
     
     def _open_records_folder(self):
-        folder = Path(APP_DIR) / "temp_records"
-        folder.mkdir(exist_ok=True)
-        os.startfile(str(folder))
+        RECORDS_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(RECORDS_DIR))
     
     def _quit(self):
         if self._meeting_recording:
@@ -789,6 +879,16 @@ class MainWindow(QMainWindow):
                 pass
         self.tray.hide()
         QApplication.quit()
+    
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+    
+    def changeEvent(self, e):
+        # Сворачивание — в панель задач (обычное поведение). В трей только по кнопке «В трей».
+        super().changeEvent(e)
     
     def closeEvent(self, e):
         e.ignore()

@@ -38,7 +38,8 @@ def get_screen_size():
 
 class MeetingRecorder:
     def __init__(self, output_dir=None):
-        self.output_dir = Path(output_dir) if output_dir else Path("./records")
+        # Папка records в корне проекта (создаётся автоматически)
+        self.output_dir = Path(output_dir) if output_dir else Path("records")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.fps = 15
@@ -122,9 +123,12 @@ class MeetingRecorder:
         
         h, w = self._frames[0].shape[:2]
         out = cv2.VideoWriter(str(tmp_video), cv2.VideoWriter_fourcc(*'XVID'), self.fps, (w, h))
-        for f in self._frames:
-            out.write(f)
-        out.release()
+        try:
+            for f in self._frames:
+                out.write(f)
+        finally:
+            out.release()
+            del out
         
         if self._audio:
             arr = np.concatenate(self._audio)
@@ -136,23 +140,43 @@ class MeetingRecorder:
                 wf.writeframes(arr.tobytes())
         
         ffmpeg = get_ffmpeg()
+        # -pix_fmt yuv420p — совместимость с плеерами Windows; -movflags +faststart, -flush_packets 1
         if tmp_audio.exists():
             cmd = [
                 ffmpeg, '-y', '-i', str(tmp_video), '-i', str(tmp_audio),
                 '-filter_complex', '[1:a]volume=2[a]', '-map', '0:v', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-b:a', '192k',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-movflags', '+faststart', '-flush_packets', '1',
                 '-shortest', str(final_video)
             ]
         else:
-            cmd = [ffmpeg, '-y', '-i', str(tmp_video), '-c:v', 'libx264', '-preset', 'ultrafast', str(final_video)]
+            cmd = [
+                ffmpeg, '-y', '-i', str(tmp_video),
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart', '-flush_packets', '1',
+                str(final_video)
+            ]
         
         try:
-            subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=180)
+            proc = subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=180)
+            if proc.returncode != 0:
+                proc = None
         except Exception:
-            pass
+            proc = None
+        
+        # Освобождение памяти: удаляем временные файлы и очищаем буферы
+        if final_video.exists():
+            try:
+                tmp_video.unlink(missing_ok=True)
+                tmp_audio.unlink(missing_ok=True)
+            except Exception:
+                pass
+        
+        # Полная очистка буферов после сохранения
+        self._frames.clear()
+        self._audio.clear()
         
         if final_video.exists():
-            tmp_video.unlink(missing_ok=True)
-            tmp_audio.unlink(missing_ok=True)
             return {"video": str(final_video), "base_name": self._base_name}
         return {"video": str(tmp_video), "base_name": self._base_name}

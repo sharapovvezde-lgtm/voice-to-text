@@ -20,6 +20,7 @@ launch.vbs
 
 # Логи
 *.log
+logs.txt
 
 # Временные файлы
 *.tmp
