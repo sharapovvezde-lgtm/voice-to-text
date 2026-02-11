@@ -1,11 +1,13 @@
-# recorder.py - Логика захвата звука с микрофона
+# recorder.py - Логика захвата звука с микрофона (без утечки памяти)
 
 import numpy as np
 import sounddevice as sd
-from scipy.io import wavfile
 import threading
-import io
 from typing import Optional, List, Tuple
+
+# Лимит буфера: ~5 минут при 16kHz float32 — защита от переполнения RAM
+MAX_BUFFER_SEC = 300
+SAMPLES_PER_CHUNK = 1024
 
 
 class AudioRecorder:
@@ -24,13 +26,19 @@ class AudioRecorder:
     
     def _audio_callback(self, indata: np.ndarray, frames: int, 
                         time_info, status) -> None:
-        """Callback для записи аудио в буфер"""
+        """Callback для записи аудио в буфер (с лимитом размера)"""
         if status:
             print(f"Audio status: {status}")
         
-        if self.is_recording:
-            with self._lock:
-                self.audio_buffer.append(indata.copy())
+        if not self.is_recording:
+            return
+        
+        with self._lock:
+            self.audio_buffer.append(indata.copy())
+            # Защита от переполнения RAM: оставляем только последние N секунд
+            max_chunks = int(self.SAMPLE_RATE * MAX_BUFFER_SEC / SAMPLES_PER_CHUNK)
+            if len(self.audio_buffer) > max_chunks:
+                self.audio_buffer = self.audio_buffer[-max_chunks:]
     
     def start_recording(self) -> bool:
         """Начинает запись аудио"""
@@ -38,7 +46,8 @@ class AudioRecorder:
             return False
         
         try:
-            self.audio_buffer = []
+            with self._lock:
+                self.audio_buffer.clear()
             self.is_recording = True
             
             self._stream = sd.InputStream(
@@ -47,7 +56,7 @@ class AudioRecorder:
                 dtype=self.DTYPE,
                 device=self.device_id,
                 callback=self._audio_callback,
-                blocksize=1024
+                blocksize=SAMPLES_PER_CHUNK
             )
             self._stream.start()
             return True
@@ -60,7 +69,7 @@ class AudioRecorder:
     def stop_recording(self) -> Optional[np.ndarray]:
         """
         Останавливает запись и возвращает записанное аудио.
-        Возвращает numpy array с аудио данными или None при ошибке.
+        Поток полностью останавливается и закрывается для освобождения памяти.
         """
         if not self.is_recording:
             return None
@@ -68,20 +77,24 @@ class AudioRecorder:
         self.is_recording = False
         
         try:
-            if self._stream:
-                self._stream.stop()
-                self._stream.close()
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                except Exception:
+                    pass
+                try:
+                    self._stream.close()
+                except Exception:
+                    pass
                 self._stream = None
             
             with self._lock:
                 if not self.audio_buffer:
                     return None
                 
-                # Объединяем все буферы в один массив
                 audio_data = np.concatenate(self.audio_buffer, axis=0)
-                self.audio_buffer = []
+                self.audio_buffer.clear()
                 
-                # Убираем лишнее измерение если есть
                 if audio_data.ndim > 1:
                     audio_data = audio_data.flatten()
                 
@@ -89,6 +102,8 @@ class AudioRecorder:
                 
         except Exception as e:
             print(f"Ошибка остановки записи: {e}")
+            with self._lock:
+                self.audio_buffer.clear()
             return None
     
     def get_audio_duration(self, audio_data: np.ndarray) -> float:

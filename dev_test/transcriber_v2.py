@@ -1,321 +1,163 @@
 """
-Meeting Transcriber v2 — Транскрибация с разделением спикеров
-- Аудио 1 (микрофон) → "Я"
-- Аудио 2 (системный) → "Собеседник"
-- Выход: текстовый отчёт с таймкодами
+Lesnov Voice — Transcriber
+- Извлекает аудио из видео
+- Разделяет по паузам
+- Формат в столбик
 """
 import os
 import sys
+import subprocess
+import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pathlib import Path
 from datetime import datetime
-import tempfile
-
+import wave
 import numpy as np
-from scipy.io import wavfile
 
-# Whisper
+CREATE_NO_WINDOW = 0x08000000
+
 try:
     import whisper
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
-    print("⚠️ openai-whisper не установлен")
+    WHISPER_OK = True
+except:
+    WHISPER_OK = False
 
 
-def format_timestamp(seconds: float) -> str:
-    """Форматирование времени: MM:SS или HH:MM:SS"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    
-    if hours > 0:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
+def get_ffmpeg():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except:
+        return "ffmpeg"
 
 
 class MeetingTranscriber:
-    """
-    Транскрибатор встреч с разделением спикеров
-    """
-    
-    def __init__(self, model_name: str = "base"):
+    def __init__(self, model_name="medium"):
         self.model_name = model_name
         self.model = None
-        
+    
     def load_model(self):
-        """Загрузить модель Whisper"""
-        if not WHISPER_AVAILABLE:
-            raise RuntimeError("openai-whisper не установлен!")
-        
-        if self.model is None:
-            print(f"📥 Загружаю модель Whisper '{self.model_name}'...")
+        if not WHISPER_OK:
+            raise RuntimeError("whisper not installed")
+        if not self.model:
+            print(f"Loading Whisper '{self.model_name}'...")
             self.model = whisper.load_model(self.model_name)
-            print("✅ Модель загружена")
-        
+            print("Model loaded")
         return self.model
     
-    def transcribe_audio(self, audio_path: str, language: str = "ru") -> list:
-        """
-        Транскрибировать аудиофайл с таймкодами
+    def _extract_audio(self, video_path):
+        """Извлечь аудио из видео"""
+        ffmpeg = get_ffmpeg()
+        tmp_wav = os.path.join(tempfile.gettempdir(), "lv_audio.wav")
         
-        Returns:
-            list of dict: [{"start": 0.0, "end": 2.5, "text": "Привет"}]
-        """
-        self.load_model()
-        
-        print(f"🔄 Транскрибирую: {audio_path}")
-        
-        # Загружаем аудио сами чтобы не зависеть от ffmpeg
-        try:
-            import wave
-            
-            with wave.open(audio_path, 'rb') as wf:
-                sample_rate = wf.getframerate()
-                n_channels = wf.getnchannels()
-                n_frames = wf.getnframes()
-                audio_bytes = wf.readframes(n_frames)
-            
-            # Конвертируем в numpy array
-            audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
-            
-            # Если стерео - конвертируем в моно
-            if n_channels > 1:
-                audio_data = audio_data.reshape(-1, n_channels)
-                audio_data = np.mean(audio_data, axis=1)
-            
-            # Конвертируем в float32 в диапазоне [-1, 1]
-            audio_float = audio_data.astype(np.float32) / 32768.0
-            
-            # Ресемплируем до 16000 Hz если нужно (Whisper требует 16kHz)
-            if sample_rate != 16000:
-                # Простой ресемплинг
-                from scipy import signal
-                num_samples = int(len(audio_float) * 16000 / sample_rate)
-                audio_float = signal.resample(audio_float, num_samples)
-            
-            print(f"   Аудио загружено: {len(audio_float)/16000:.1f} сек")
-            
-            # Транскрибируем
-            result = self.model.transcribe(
-                audio_float,
-                language=language,
-                task="transcribe",
-                verbose=False
-            )
-            
-        except Exception as e:
-            print(f"   ⚠️ Ошибка загрузки аудио: {e}")
-            # Fallback - пробуем напрямую (если ffmpeg есть)
-            result = self.model.transcribe(
-                audio_path,
-                language=language,
-                task="transcribe",
-                verbose=False
-            )
-        
-        segments = []
-        for seg in result.get("segments", []):
-            segments.append({
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg["text"].strip()
-            })
-        
-        return segments
-    
-    def transcribe_meeting(
-        self,
-        mic_audio_path: str = None,
-        sys_audio_path: str = None,
-        language: str = "ru"
-    ) -> dict:
-        """
-        Транскрибировать встречу с разделением спикеров
-        
-        Args:
-            mic_audio_path: путь к WAV микрофона ("Я")
-            sys_audio_path: путь к WAV системного звука ("Собеседник")
-            language: язык для распознавания
-        
-        Returns:
-            dict: {"segments": [...], "full_text": "..."}
-        """
-        all_segments = []
-        
-        # Транскрибируем микрофон ("Я")
-        if mic_audio_path and os.path.exists(mic_audio_path):
-            print("\n🎤 Транскрибирую микрофон (Я)...")
-            try:
-                mic_segments = self.transcribe_audio(mic_audio_path, language)
-                for seg in mic_segments:
-                    seg["speaker"] = "Я"
-                all_segments.extend(mic_segments)
-                print(f"   ✅ Найдено {len(mic_segments)} сегментов")
-            except Exception as e:
-                print(f"   ❌ Ошибка: {e}")
-        else:
-            print(f"⚠️ Файл микрофона не найден: {mic_audio_path}")
-        
-        # Транскрибируем системный звук ("Собеседник")
-        if sys_audio_path and os.path.exists(sys_audio_path):
-            print("\n🔊 Транскрибирую системный звук (Собеседник)...")
-            try:
-                sys_segments = self.transcribe_audio(sys_audio_path, language)
-                for seg in sys_segments:
-                    seg["speaker"] = "Собеседник"
-                all_segments.extend(sys_segments)
-                print(f"   ✅ Найдено {len(sys_segments)} сегментов")
-            except Exception as e:
-                print(f"   ❌ Ошибка: {e}")
-        else:
-            if sys_audio_path:
-                print(f"⚠️ Файл системного звука не найден: {sys_audio_path}")
-        
-        if not all_segments:
-            print("⚠️ Не найдено ни одного сегмента для транскрибации")
-            return {
-                "segments": [],
-                "full_text": "(Пусто - речь не распознана)"
-            }
-        
-        # Сортируем по времени
-        all_segments.sort(key=lambda x: x["start"])
-        
-        # Объединяем близкие сегменты одного спикера
-        merged_segments = self._merge_segments(all_segments)
-        
-        # Формируем полный текст
-        full_text = self._format_transcript(merged_segments)
-        
-        return {
-            "segments": merged_segments,
-            "full_text": full_text
-        }
-    
-    def _merge_segments(self, segments: list, gap_threshold: float = 1.0) -> list:
-        """
-        Объединить близкие сегменты одного спикера
-        """
-        if not segments:
-            return []
-        
-        merged = []
-        current = segments[0].copy()
-        
-        for seg in segments[1:]:
-            # Если тот же спикер и маленький промежуток - объединяем
-            if (seg["speaker"] == current["speaker"] and 
-                seg["start"] - current["end"] < gap_threshold):
-                current["end"] = seg["end"]
-                current["text"] += " " + seg["text"]
-            else:
-                merged.append(current)
-                current = seg.copy()
-        
-        merged.append(current)
-        return merged
-    
-    def _format_transcript(self, segments: list) -> str:
-        """Форматировать транскрипт в читаемый текст"""
-        lines = []
-        for seg in segments:
-            ts = format_timestamp(seg["start"])
-            speaker = seg["speaker"]
-            text = seg["text"]
-            lines.append(f"[{ts}] {speaker}: {text}")
-        
-        return "\n".join(lines)
-    
-    def save_report(
-        self,
-        transcript: dict,
-        output_path: str = None,
-        video_path: str = None
-    ) -> str:
-        """
-        Сохранить отчёт о встрече
-        
-        Args:
-            transcript: результат transcribe_meeting()
-            output_path: путь для сохранения (опционально)
-            video_path: путь к видео (для имени файла)
-        
-        Returns:
-            путь к сохранённому файлу
-        """
-        if not output_path:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if video_path:
-                base = Path(video_path).stem
-                output_path = str(Path(video_path).parent / f"{base}_transcript.txt")
-            else:
-                output_path = f"Meeting_Report_{timestamp}.txt"
-        
-        # Формируем отчёт
-        report_lines = [
-            "=" * 60,
-            "📋 ОТЧЁТ О ВСТРЕЧЕ",
-            f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            "=" * 60,
-            "",
-            "📝 ТРАНСКРИПЦИЯ:",
-            "-" * 40,
-            "",
-            transcript["full_text"],
-            "",
-            "-" * 40,
-            f"📊 Всего сегментов: {len(transcript['segments'])}",
-            "=" * 60
+        cmd = [
+            ffmpeg, '-y', '-i', video_path,
+            '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+            tmp_wav
         ]
         
-        report_text = "\n".join(report_lines)
+        try:
+            subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=120)
+            if os.path.exists(tmp_wav):
+                return tmp_wav
+        except Exception as e:
+            print(f"Extract error: {e}")
+        return None
+    
+    def _load_wav(self, path):
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with wave.open(path, 'rb') as wf:
+                data = wf.readframes(wf.getnframes())
+            return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        except:
+            return None
+    
+    def transcribe_meeting(self, video_path=None, audio_path=None, mic_path=None, 
+                          sys_path=None, language="ru"):
+        """Транскрибация видео"""
+        
+        # Извлекаем аудио из видео
+        if video_path and os.path.exists(video_path):
+            print(f"Extracting audio from {Path(video_path).name}...")
+            audio_path = self._extract_audio(video_path)
+        
+        if not audio_path:
+            return {"segments": [], "full_text": "(Нет аудио)"}
+        
+        audio = self._load_wav(audio_path)
+        
+        # Удаляем временный файл
+        if audio_path.startswith(tempfile.gettempdir()):
+            try:
+                os.remove(audio_path)
+            except:
+                pass
+        
+        if audio is None or len(audio) < 1000:
+            return {"segments": [], "full_text": "(Аудио пустое)"}
+        
+        print(f"Transcribing ({len(audio)/16000:.1f}s)...")
+        self.load_model()
+        
+        result = self.model.transcribe(
+            audio, 
+            language=language, 
+            verbose=False,
+            temperature=0.0,
+            best_of=5,
+            beam_size=5
+        )
+        
+        segments = [{"start": s["start"], "end": s["end"], "text": s["text"].strip()} 
+                   for s in result.get("segments", []) if s["text"].strip()]
+        
+        print(f"Found {len(segments)} segments")
+        
+        if not segments:
+            return {"segments": [], "full_text": "(Речь не распознана)"}
+        
+        # Формат в столбик - разделение по паузам
+        lines = []
+        prev_end = 0
+        
+        for s in segments:
+            text = s["text"].strip()
+            if not text:
+                continue
+            
+            pause = s["start"] - prev_end
+            
+            # Пустая строка при паузе > 1.5 сек
+            if pause > 1.5 and prev_end > 0:
+                lines.append("")
+            
+            lines.append(text)
+            prev_end = s["end"]
+        
+        return {"segments": segments, "full_text": "\n".join(lines)}
+    
+    def save_report(self, transcript, output_path=None, video_path=None, **kwargs):
+        
+        if not output_path:
+            if video_path:
+                output_path = str(Path(video_path).with_suffix('.txt'))
+            else:
+                output_path = f"Meeting_{datetime.now():%Y%m%d_%H%M%S}.txt"
+        
+        report = f"""{'='*50}
+ЗАПИСЬ — {datetime.now():%d.%m.%Y %H:%M}
+{'='*50}
+
+{transcript['full_text']}
+
+{'='*50}
+"""
         
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(report_text)
+            f.write(report)
         
-        print(f"📄 Отчёт сохранён: {output_path}")
+        print(f"Saved: {output_path}")
         return output_path
-
-
-# ===== Тестовый запуск =====
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("🔬 ТЕСТ MeetingTranscriber")
-    print("="*60)
-    
-    transcriber = MeetingTranscriber(model_name="base")
-    
-    # Пример использования
-    print("""
-Примеры использования:
-
-1. Транскрибация видео с двумя аудиодорожками:
-   result = transcriber.transcribe_meeting(video_path="meeting.mp4")
-   transcriber.save_report(result, "report.txt")
-
-2. Транскрибация отдельных аудиофайлов:
-   result = transcriber.transcribe_meeting(
-       mic_audio_path="mic.wav",
-       sys_audio_path="system.wav"
-   )
-
-3. Ожидаемый формат вывода:
-   [00:00] Я: Всем привет
-   [00:03] Собеседник: Здравствуйте
-   [00:08] Я: Начнём встречу
-""")
-    
-    # Тест загрузки модели
-    if WHISPER_AVAILABLE:
-        print("\nЗагружаю модель для теста...")
-        try:
-            transcriber.load_model()
-            print("✅ Модель загружена успешно!")
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-    else:
-        print("❌ Whisper не установлен")
-    
-    input("\nНажмите Enter для выхода...")

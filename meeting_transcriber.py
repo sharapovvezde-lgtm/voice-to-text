@@ -2,6 +2,7 @@
 Расшифровка записи встречи из видео.
 """
 import os
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
@@ -78,7 +79,22 @@ class MeetingTranscriber:
             return {"segments": [], "full_text": "(Аудио пустое)"}
         
         self.load_model()
-        result = self.model.transcribe(audio, language=language, verbose=False, temperature=0.0, best_of=5, beam_size=5)
+        # При запуске через pythonw нет консоли — sys.stdout/stderr бывают None, whisper вызывает .write() и падает
+        import io
+        _safe = io.StringIO()
+        _old_out = getattr(sys, "stdout", None)
+        _old_err = getattr(sys, "stderr", None)
+        if _old_out is None:
+            sys.stdout = _safe
+        if _old_err is None:
+            sys.stderr = _safe
+        try:
+            result = self.model.transcribe(audio, language=language, verbose=False, temperature=0.0, best_of=5, beam_size=5)
+        finally:
+            if _old_out is not None:
+                sys.stdout = _old_out
+            if _old_err is not None:
+                sys.stderr = _old_err
         
         segments = [{"start": s["start"], "end": s["end"], "text": s["text"].strip()}
                    for s in result.get("segments", []) if s["text"].strip()]
@@ -99,9 +115,14 @@ class MeetingTranscriber:
     
     def save_report(self, transcript, output_path=None, video_path=None, **kwargs):
         if not output_path:
-            output_path = str(Path(video_path).with_suffix('.txt')) if video_path else f"Meeting_{datetime.now():%Y%m%d_%H%M%S}.txt"
-        
-        report = f"{'='*50}\nЗАПИСЬ — {datetime.now():%d.%m.%Y %H:%M}\n{'='*50}\n\n{transcript['full_text']}\n\n{'='*50}\n"
+            if video_path:
+                p = Path(video_path).resolve()
+                output_path = str(p.with_suffix('.txt'))
+            else:
+                output_path = str(Path.cwd() / f"Meeting_{datetime.now():%Y%m%d_%H%M%S}.txt")
+        else:
+            output_path = str(Path(output_path).resolve())
+        report = f"{'='*50}\nЗАПИСЬ — {datetime.now():%d.%m.%Y %H:%M}\n{'='*50}\n\n{transcript.get('full_text', '')}\n\n{'='*50}\n"
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(report)
         return output_path
